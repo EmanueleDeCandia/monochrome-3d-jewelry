@@ -4,7 +4,7 @@
   body {
     background-color: #000000;
     color: #ffffff;
-    font-family: 'Cormorant Garamond', serif;
+    font-family: 'Cormorant Garamond', 'Times New Roman', serif;
     overflow-x: hidden;
     user-select: none;
     -webkit-font-smoothing: antialiased;
@@ -12,12 +12,29 @@
 }
 
 .font-serif-luxury {
-  font-family: 'Cinzel', serif;
+  font-family: 'Cinzel', 'Times New Roman', serif;
   letter-spacing: 0.15em;
 }
 
 .font-mono-cad {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Range inputs: square monochrome thumbs, consistent across engines */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 0;
+  background: #ffffff;
+  border: 1px solid #000000;
+}
+input[type='range']::-moz-range-track {
+  height: 4px;
+  background: #27272a;
 }
 
 /* Custom luxury monochrome scrollbars */

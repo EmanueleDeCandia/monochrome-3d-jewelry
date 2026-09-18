@@ -1,249 +1,339 @@
 import * as THREE from 'three';
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { findBackdrop, findLighting, type BackdropId, type EnvPresetId, type LightingPresetId } from './types';
 
 export interface StudioEnvironmentResult {
-  envTexture: THREE.Texture;
-  keySpotLight: THREE.SpotLight;
-  rimSpotLight: THREE.SpotLight;
-  overheadLight: THREE.SpotLight;
-  updateMouseLight: (ndcX: number, ndcY: number) => void;
-  setLightingPreset: (preset: 'high_contrast' | 'soft_editorial' | 'rim_noir' | 'top_spot') => void;
+  /** regenerates the IBL for another softbox layout, releasing the previous one */
+  setEnvPreset: (preset: EnvPresetId) => void;
+  setLightingPreset: (preset: LightingPresetId) => void;
+  setEnvIntensity: (value: number) => void;
+  /** degrees */
+  setEnvRotation: (degrees: number) => void;
+  setLightIntensity: (scale: number) => void;
+  setBackdrop: (id: BackdropId) => void;
+  setBackdropVisible: (visible: boolean) => void;
+  setPointerLight: (enabled: boolean) => void;
+  /** feeds the normalised device coordinates of the pointer (-1..1) */
+  updatePointer: (ndcX: number, ndcY: number) => void;
+  /** eases the pointer light towards its target, called once per frame */
+  tick: () => void;
+  setShadows: (enabled: boolean) => void;
+  backdrop: THREE.Mesh;
+  dispose: () => void;
 }
 
 /**
- * Creates an ultra-sharp Monochrome Keyshot Studio Equirectangular map.
- * This simulates high-end jewelry photography softboxes, strip lights, and black negative baffles.
+ * Paints a monochrome studio HDRI (equirectangular) on a 2D canvas.
+ *
+ * The repository used to ship a 45 byte placeholder file named
+ * `studio_black_white_sharp.hdr` whose RGBELoader parsing always failed, so the
+ * "HDRI" lighting never worked. Generating the environment procedurally keeps
+ * the project self-contained (0 assets, no network round-trip) and makes the
+ * softbox layout switchable at runtime.
  */
-export function createMonochromeStudioTexture(renderer: THREE.WebGLRenderer): THREE.Texture {
-  const width = 2048;
-  const height = 1024;
+function paintStudioEnvironment(preset: EnvPresetId, width = 1024): HTMLCanvasElement {
+  const height = width / 2;
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
 
-  if (!ctx) {
-    const fallback = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
-    fallback.needsUpdate = true;
-    return fallback;
-  }
-
-  // Pure black studio base
-  ctx.fillStyle = '#020202';
+  // studio black base
+  ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
-  // 1. Subtle horizon / ground gradient (monochrome)
-  const groundGrad = ctx.createLinearGradient(0, height * 0.5, 0, height);
-  groundGrad.addColorStop(0, '#0a0a0a');
-  groundGrad.addColorStop(0.3, '#141414');
-  groundGrad.addColorStop(1, '#000000');
-  ctx.fillStyle = groundGrad;
+  const drawSoftBox = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    intensity: number,
+    softness = 0.5
+  ) => {
+    const g = ctx.createRadialGradient(x, y, 1, x, y, Math.max(w, h) / 2);
+    const inner = Math.round(255 * intensity);
+    const mid = Math.round(inner * 0.55);
+    g.addColorStop(0, `rgb(${inner},${inner},${inner})`);
+    g.addColorStop(Math.min(0.85, softness), `rgb(${mid},${mid},${mid})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(x, y, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    void softness;
+  };
+
+  const drawStrip = (
+    x: number,
+    widthPct: number,
+    topPct: number,
+    heightPct: number,
+    intensity: number
+  ) => {
+    const w = width * widthPct;
+    const x0 = x - w / 2;
+    const g = ctx.createLinearGradient(x0, 0, x0 + w, 0);
+    const v = Math.round(255 * intensity);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.45, `rgb(${v},${v},${v})`);
+    g.addColorStop(0.55, `rgb(${v},${v},${v})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x0, height * topPct, w, height * heightPct);
+  };
+
+  // 1. ground / horizon falloff, common to every layout
+  const floor = ctx.createLinearGradient(0, height * 0.5, 0, height);
+  floor.addColorStop(0, '#0d0d0d');
+  floor.addColorStop(0.55, '#151515');
+  floor.addColorStop(1, '#000000');
+  ctx.fillStyle = floor;
   ctx.fillRect(0, height * 0.5, width, height * 0.5);
 
-  // 2. High-intensity Overhead Softbox (Center Zenith)
-  // Essential for lighting the top faces of the 'William' text and diamond tables
-  const zenithGrad = ctx.createRadialGradient(
-    width * 0.5,
-    height * 0.18,
-    10,
-    width * 0.5,
-    height * 0.18,
-    width * 0.35
-  );
-  zenithGrad.addColorStop(0, '#FFFFFF');
-  zenithGrad.addColorStop(0.2, '#EAEAEA');
-  zenithGrad.addColorStop(0.5, '#707070');
-  zenithGrad.addColorStop(0.8, '#181818');
-  zenithGrad.addColorStop(1.0, 'transparent');
-  ctx.fillStyle = zenithGrad;
-  ctx.fillRect(0, 0, width, height * 0.5);
-
-  // 3. Sharp Left Strip Softbox (Creates crisp linear specular lines along jewelry edges)
-  const leftStrip = ctx.createLinearGradient(width * 0.18, 0, width * 0.28, 0);
-  leftStrip.addColorStop(0, 'transparent');
-  leftStrip.addColorStop(0.4, '#FFFFFF');
-  leftStrip.addColorStop(0.6, '#FFFFFF');
-  leftStrip.addColorStop(1, 'transparent');
-  ctx.fillStyle = leftStrip;
-  ctx.fillRect(width * 0.15, height * 0.1, width * 0.16, height * 0.5);
-
-  // 4. Sharp Right Strip Softbox
-  const rightStrip = ctx.createLinearGradient(width * 0.72, 0, width * 0.82, 0);
-  rightStrip.addColorStop(0, 'transparent');
-  rightStrip.addColorStop(0.4, '#FFFFFF');
-  rightStrip.addColorStop(0.6, '#FFFFFF');
-  rightStrip.addColorStop(1, 'transparent');
-  ctx.fillStyle = rightStrip;
-  ctx.fillRect(width * 0.69, height * 0.1, width * 0.16, height * 0.5);
-
-  // 5. Back Rim Light (Separates diamond pavilion and platinum chain from black void)
-  const rimGrad = ctx.createRadialGradient(
-    width * 0.5,
-    height * 0.75,
-    5,
-    width * 0.5,
-    height * 0.75,
-    width * 0.22
-  );
-  rimGrad.addColorStop(0, '#A0A0A0');
-  rimGrad.addColorStop(0.5, '#404040');
-  rimGrad.addColorStop(1, 'transparent');
-  ctx.fillStyle = rimGrad;
-  ctx.fillRect(width * 0.3, height * 0.6, width * 0.4, height * 0.35);
-
-  // 6. Micro Pin-Point Highlights (Give diamond micro-facets ultra-sharp sparkle glints)
-  const pinPoints = [
-    { x: width * 0.38, y: height * 0.24, r: 18 },
-    { x: width * 0.62, y: height * 0.24, r: 18 },
-    { x: width * 0.48, y: height * 0.35, r: 12 },
-    { x: width * 0.52, y: height * 0.12, r: 24 },
-  ];
-  for (const pin of pinPoints) {
-    const pGrad = ctx.createRadialGradient(pin.x, pin.y, 1, pin.x, pin.y, pin.r);
-    pGrad.addColorStop(0, '#FFFFFF');
-    pGrad.addColorStop(0.3, '#FFFFFF');
-    pGrad.addColorStop(1, 'transparent');
-    ctx.fillStyle = pGrad;
-    ctx.beginPath();
-    ctx.arc(pin.x, pin.y, pin.r, 0, Math.PI * 2);
-    ctx.fill();
+  switch (preset) {
+    case 'studio': {
+      // even dome: neutral, flat, great for CAD readability
+      const dome = ctx.createLinearGradient(0, 0, 0, height * 0.6);
+      dome.addColorStop(0, '#c9c9c9');
+      dome.addColorStop(0.55, '#6b6b6b');
+      dome.addColorStop(1, '#101010');
+      ctx.fillStyle = dome;
+      ctx.fillRect(0, 0, width, height * 0.6);
+      drawSoftBox(width * 0.5, height * 0.22, width * 0.5, height * 0.55, 1.0, 0.6);
+      break;
+    }
+    case 'softbox': {
+      // two strip boxes + top: the classic jewellery setup
+      drawStrip(width * 0.2, 0.11, 0.05, 0.55, 1.0);
+      drawStrip(width * 0.8, 0.11, 0.05, 0.55, 1.0);
+      drawSoftBox(width * 0.5, height * 0.14, width * 0.4, height * 0.4, 0.9, 0.55);
+      drawSoftBox(width * 0.5, height * 0.78, width * 0.5, height * 0.3, 0.35, 0.6);
+      break;
+    }
+    case 'dome': {
+      // huge soft light from above, open shadows (editorial soft)
+      const g = ctx.createLinearGradient(0, 0, 0, height);
+      g.addColorStop(0, '#ffffff');
+      g.addColorStop(0.35, '#9a9a9a');
+      g.addColorStop(0.62, '#3a3a3a');
+      g.addColorStop(1, '#050505');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, width, height * 0.75);
+      drawSoftBox(width * 0.5, height * 0.3, width * 0.85, height * 0.7, 1.0, 0.75);
+      break;
+    }
+    case 'noir':
+    default: {
+      // single hard key light and deep black baffles
+      const baffle = ctx.createLinearGradient(0, 0, width, 0);
+      baffle.addColorStop(0, '#050505');
+      baffle.addColorStop(0.5, '#1b1b1b');
+      baffle.addColorStop(1, '#050505');
+      ctx.fillStyle = baffle;
+      ctx.fillRect(0, height * 0.2, width, height * 0.5);
+      drawSoftBox(width * 0.34, height * 0.2, width * 0.22, height * 0.34, 1.0, 0.35);
+      drawStrip(width * 0.86, 0.05, 0.3, 0.35, 0.5);
+      drawSoftBox(width * 0.5, height * 0.86, width * 0.3, height * 0.25, 0.22, 0.5);
+      break;
+    }
   }
 
-  // Process through Three.js PMREMGenerator for photorealistic PBR reflections
-  const canvasTexture = new THREE.CanvasTexture(canvas);
-  canvasTexture.mapping = THREE.EquirectangularReflectionMapping;
-  canvasTexture.colorSpace = THREE.SRGBColorSpace;
-  canvasTexture.needsUpdate = true;
+  return canvas;
+}
 
-  const pmremGenerator = new THREE.PMREMGenerator(renderer);
-  pmremGenerator.compileEquirectangularShader();
-  const renderTarget = pmremGenerator.fromEquirectangular(canvasTexture);
-  canvasTexture.dispose();
+function equirectTexture(canvas: HTMLCanvasElement): THREE.CanvasTexture {
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
 
-  return renderTarget.texture;
+function paintBackdrop(stops: [string, string, string]): THREE.CanvasTexture {
+  const size = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = stops[2];
+    ctx.fillRect(0, 0, size, size);
+    const g = ctx.createRadialGradient(
+      size * 0.5,
+      size * 0.42,
+      size * 0.02,
+      size * 0.5,
+      size * 0.45,
+      size * 0.72
+    );
+    g.addColorStop(0, stops[0]);
+    g.addColorStop(0.55, stops[1]);
+    g.addColorStop(1, stops[2]);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 /**
- * Sets up studio lighting and monochrome environment mapping.
- * Initializes RGBELoader for `/assets/studio_black_white_sharp.hdr`
- * with guaranteed procedural fallback.
+ * Sets up the studio: procedural IBL, three sculpting spot lights, a backdrop
+ * dome and the optional pointer-following key light.
  */
 export function setupStudioLighting(
   scene: THREE.Scene,
   renderer: THREE.WebGLRenderer
 ): StudioEnvironmentResult {
-  // 1. Initial Monochrome Studio PMREM Environment
-  const proceduralEnv = createMonochromeStudioTexture(renderer);
-  scene.environment = proceduralEnv;
-  scene.background = new THREE.Color('#030303');
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
 
-  // 2. Monochrome IBL Loader: Load greyscale studio HDRI as per spec
-  const rgbeLoader = new RGBELoader();
-  const hdrPaths = [
-    '/assets/studio_black_white_sharp.hdr',
-    './assets/studio_black_white_sharp.hdr',
-    './textures/studio_black_white_sharp.hdr',
-  ];
+  let envTarget: THREE.WebGLRenderTarget | null = null;
+  let envTexture: THREE.Texture = new THREE.Texture();
 
-  function tryLoadHDR(pathIndex: number) {
-    if (pathIndex >= hdrPaths.length) return;
-    const path = hdrPaths[pathIndex];
-    rgbeLoader.load(
-      path,
-      (texture) => {
-        texture.mapping = THREE.EquirectangularReflectionMapping;
-        scene.environment = texture;
-      },
-      undefined,
-      () => {
-        // Fallback to next path or continue with high-quality procedural PMREM
-        tryLoadHDR(pathIndex + 1);
-      }
-    );
-  }
-  tryLoadHDR(0);
+  const applyEnv = (preset: EnvPresetId) => {
+    const previousTarget = envTarget;
+    const previousTexture = envTexture;
 
-  // 3. Key Light 1: High-intensity SpotLight (#FFFFFF) with castShadow = true
-  // Creates sharp, dramatic white highlights and deep black shadows on diamond facets
-  const keySpotLight = new THREE.SpotLight(0xffffff, 85);
-  keySpotLight.position.set(5.5, 7.5, 6.5);
-  keySpotLight.angle = Math.PI / 4.2;
-  keySpotLight.penumbra = 0.35;
-  keySpotLight.decay = 2.0;
-  keySpotLight.distance = 40;
+    const next = equirectTexture(paintStudioEnvironment(preset));
+    const target = pmrem.fromEquirectangular(next);
+    next.dispose();
+
+    envTarget = target;
+    envTexture = target.texture;
+    scene.environment = envTexture;
+
+    if (previousTarget) previousTarget.dispose();
+    previousTexture.dispose();
+  };
+
+  // IBL ---------------------------------------------------------------
+  scene.environmentIntensity = 1;
+  applyEnv('softbox');
+  scene.background = null;
+
+  // backdrop dome ------------------------------------------------------
+  let backdropTexture = paintBackdrop(findBackdrop('black').stops);
+  const backdropMaterial = new THREE.MeshBasicMaterial({
+    map: backdropTexture,
+    side: THREE.BackSide,
+    depthWrite: false,
+    toneMapped: true,
+  });
+  const backdrop = new THREE.Mesh(new THREE.SphereGeometry(28, 32, 24), backdropMaterial);
+  backdrop.name = 'StudioBackdrop';
+  backdrop.frustumCulled = false;
+  scene.add(backdrop);
+
+  // lights -------------------------------------------------------------
+  // decay = 0 keeps the intensities independent from the camera distance, so
+  // the presets stay predictable while the user tweaks exposure.
+  const keySpotLight = new THREE.SpotLight(0xffffff, 2.2, 0, Math.PI / 5, 0.45, 0);
+  keySpotLight.position.set(6.5, 8.5, 8.0);
   keySpotLight.castShadow = true;
-  keySpotLight.shadow.mapSize.width = 2048;
-  keySpotLight.shadow.mapSize.height = 2048;
-  keySpotLight.shadow.camera.near = 1.0;
-  keySpotLight.shadow.camera.far = 30;
-  keySpotLight.shadow.bias = -0.0001;
+  keySpotLight.shadow.mapSize.set(2048, 2048);
+  keySpotLight.shadow.camera.near = 1;
+  keySpotLight.shadow.camera.far = 36;
+  keySpotLight.shadow.bias = -0.0004;
+  keySpotLight.shadow.normalBias = 0.02;
   scene.add(keySpotLight);
+  scene.add(keySpotLight.target);
 
-  // 4. Key Light 2: High-intensity Rim/Fill SpotLight (#FFFFFF) with castShadow = true
-  const rimSpotLight = new THREE.SpotLight(0xffffff, 55);
-  rimSpotLight.position.set(-6.5, -4.0, 5.0);
-  rimSpotLight.angle = Math.PI / 3.8;
-  rimSpotLight.penumbra = 0.45;
-  rimSpotLight.decay = 2.0;
-  rimSpotLight.distance = 35;
+  const rimSpotLight = new THREE.SpotLight(0xffffff, 1.4, 0, Math.PI / 3.6, 0.6, 0);
+  rimSpotLight.position.set(-7.5, -3.5, 5.5);
   rimSpotLight.castShadow = true;
-  rimSpotLight.shadow.mapSize.width = 1024;
-  rimSpotLight.shadow.mapSize.height = 1024;
-  rimSpotLight.shadow.bias = -0.0001;
+  rimSpotLight.shadow.mapSize.set(1024, 1024);
+  rimSpotLight.shadow.bias = -0.0006;
+  rimSpotLight.shadow.normalBias = 0.03;
   scene.add(rimSpotLight);
+  scene.add(rimSpotLight.target);
 
-  // 5. Overhead Soft Top Spot (Sculpting the nameplate and top pavé row)
-  const overheadLight = new THREE.SpotLight(0xffffff, 40);
-  overheadLight.position.set(0, 9.0, 2.0);
-  overheadLight.angle = Math.PI / 3.0;
-  overheadLight.penumbra = 0.6;
-  overheadLight.castShadow = false;
+  const overheadLight = new THREE.SpotLight(0xffffff, 1.0, 0, Math.PI / 2.6, 0.75, 0);
+  overheadLight.position.set(0, 10, 2.5);
   scene.add(overheadLight);
+  scene.add(overheadLight.target);
 
-  // Dynamic light offset target coordinates
-  const defaultKeyPos = keySpotLight.position.clone();
-  let targetX = defaultKeyPos.x;
-  let targetY = defaultKeyPos.y;
+  let presetScale = { key: 1, rim: 1, top: 1 };
+  let masterScale = 1;
+  let pointerLightEnabled = false;
+  const pointerTarget = new THREE.Vector2(0, 0);
+  const keyHome = keySpotLight.position.clone();
 
-  const updateMouseLight = (ndcX: number, ndcY: number) => {
-    // Subtle cursor offset tracking (dancing specular highlights across 'William' text)
-    targetX = defaultKeyPos.x + ndcX * 3.2;
-    targetY = defaultKeyPos.y + ndcY * 2.8;
-    keySpotLight.position.x += (targetX - keySpotLight.position.x) * 0.08;
-    keySpotLight.position.y += (targetY - keySpotLight.position.y) * 0.08;
+  const applyLightIntensity = () => {
+    keySpotLight.intensity = 2.2 * presetScale.key * masterScale;
+    rimSpotLight.intensity = 1.4 * presetScale.rim * masterScale;
+    overheadLight.intensity = 1.0 * presetScale.top * masterScale;
   };
-
-  const setLightingPreset = (preset: 'high_contrast' | 'soft_editorial' | 'rim_noir' | 'top_spot') => {
-    switch (preset) {
-      case 'high_contrast':
-        keySpotLight.intensity = 85;
-        rimSpotLight.intensity = 55;
-        overheadLight.intensity = 40;
-        break;
-      case 'soft_editorial':
-        keySpotLight.intensity = 50;
-        rimSpotLight.intensity = 40;
-        overheadLight.intensity = 70;
-        break;
-      case 'rim_noir':
-        keySpotLight.intensity = 30;
-        rimSpotLight.intensity = 95;
-        overheadLight.intensity = 20;
-        break;
-      case 'top_spot':
-        keySpotLight.intensity = 40;
-        rimSpotLight.intensity = 30;
-        overheadLight.intensity = 100;
-        break;
-    }
-  };
+  applyLightIntensity();
 
   return {
-    envTexture: proceduralEnv,
-    keySpotLight,
-    rimSpotLight,
-    overheadLight,
-    updateMouseLight,
-    setLightingPreset,
+    setEnvPreset: (preset) => applyEnv(preset),
+    setLightingPreset: (preset) => {
+      const definition = findLighting(preset);
+      presetScale = { key: definition.key, rim: definition.rim, top: definition.top };
+      applyLightIntensity();
+      applyEnv(definition.envPreset);
+      scene.environmentIntensity = definition.envIntensity;
+    },
+    setEnvIntensity: (value) => {
+      scene.environmentIntensity = Math.max(0, value);
+    },
+    setEnvRotation: (degrees) => {
+      scene.environmentRotation.set(0, THREE.MathUtils.degToRad(degrees), 0);
+    },
+    setLightIntensity: (scale) => {
+      masterScale = scale;
+      applyLightIntensity();
+    },
+    setBackdrop: (id) => {
+      const definition = findBackdrop(id);
+      const previous = backdropTexture;
+      backdropTexture = paintBackdrop(definition.stops);
+      backdropMaterial.map = backdropTexture;
+      backdropMaterial.needsUpdate = true;
+      previous.dispose();
+    },
+    setBackdropVisible: (visible) => {
+      backdrop.visible = visible;
+    },
+    setPointerLight: (enabled) => {
+      pointerLightEnabled = enabled;
+      if (!enabled) {
+        keySpotLight.position.copy(keyHome);
+        pointerTarget.set(0, 0);
+      }
+    },
+    updatePointer: (ndcX, ndcY) => {
+      if (!pointerLightEnabled) return;
+      pointerTarget.set(ndcX, ndcY);
+    },
+    tick: () => {
+      // subtle pointer-following key light: the old build moved a 85 cd
+      // spotlight on every mousemove, which washed out the piece.
+      const targetX = keyHome.x + (pointerLightEnabled ? pointerTarget.x * 1.6 : 0);
+      const targetY = keyHome.y + (pointerLightEnabled ? pointerTarget.y * 1.2 : 0);
+      keySpotLight.position.x += (targetX - keySpotLight.position.x) * 0.06;
+      keySpotLight.position.y += (targetY - keySpotLight.position.y) * 0.06;
+    },
+    setShadows: (enabled) => {
+      renderer.shadowMap.enabled = enabled;
+    },
+    backdrop,
+    dispose: () => {
+      pmrem.dispose();
+      if (envTarget) envTarget.dispose();
+      else envTexture.dispose();
+      backdropTexture.dispose();
+      if (backdropMaterial.map && backdropMaterial.map !== backdropTexture) {
+        backdropMaterial.map.dispose();
+      }
+      backdropMaterial.dispose();
+      backdrop.geometry.dispose();
+      [keySpotLight, rimSpotLight, overheadLight].forEach((light) => {
+        light.shadow?.map?.dispose();
+        light.removeFromParent();
+      });
+    },
   };
 }

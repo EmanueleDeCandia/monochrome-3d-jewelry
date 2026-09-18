@@ -4,4 +4,6 @@ export * from './gemstoneGeometry';
 export * from './jewelryBuilder';
 export * from './studioEnvironment';
 export * from './postprocessing';
-export * from './fonts/luxurySerifFont';
+export * from './types';
+export * from './fonts';
+export * from './cameraFraming';

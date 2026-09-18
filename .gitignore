@@ -1,6 +1,7 @@
 node_modules
 dist
 dist-ssr
+tools/out
 *.local
 .vscode/*
 !.vscode/extensions.json

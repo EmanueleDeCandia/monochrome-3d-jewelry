@@ -1,12 +1,16 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "monochrome-3d-jewelry",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "verify:scene": "node tools/verify-scene.mjs",
+    "render:views": "node tools/render-views.mjs",
+    "typefaces": "node tools/generate-typefaces.mjs"
   },
   "dependencies": {
     "@types/three": "^0.186.0",
@@ -23,9 +27,11 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "opentype.js": "^1.3.4",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
-    "vite": "7.3.2",
+    "vite": "^7.3.6",
     "vite-plugin-singlefile": "2.3.0"
-  }
+  },
+  "description": "Studio CAD 3D monocromo: ciondolo personalizzabile con nome inciso, pavé di brillanti e catena cubana (React + three.js)."
 }

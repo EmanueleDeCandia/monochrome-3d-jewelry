@@ -2,8 +2,6 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { SSAOPass } from 'three/examples/jsm/postprocessing/SSAOPass.js';
 
@@ -11,94 +9,119 @@ export interface PostprocessingPipeline {
   composer: EffectComposer;
   bloomPass: UnrealBloomPass;
   ssaoPass: SSAOPass;
-  fxaaPass: ShaderPass;
-  resize: (width: number, height: number) => void;
+  setSize: (width: number, height: number, pixelRatio: number) => void;
   render: () => void;
-  setBloomIntensity: (intensity: number) => void;
+  setBloom: (enabled: boolean) => void;
+  setBloomStrength: (strength: number) => void;
+  setSsao: (enabled: boolean) => void;
+  /** used by the high resolution capture */
+  setTransientDisabled: (disabled: boolean) => void;
+  dispose: () => void;
 }
 
 /**
- * Initializes the Post-Processing Pipeline adhering strictly to:
- * - Anti-Glare Bloom: Intensity <= 0.8, Radius = 0.5, Threshold = 0.95
- * - SSAO: Radius = 0.15, Intensity = 3.0
- * - ACESFilmicToneMapping clamped between 1.0 and 1.2
- * - FXAA anti-aliasing
+ * Post-processing chain.
+ *
+ * Fixed compared to the original pipeline:
+ * - The composer now renders into a multisampled (MSAA) half-float buffer.
+ *   `EffectComposer` creates its own render target, so `antialias: true` on the
+ *   WebGLRenderer had no effect at all and the old code patched the missing
+ *   anti-aliasing with FXAA *before* the OutputPass (i.e. on linear HDR data,
+ *   which is not what FXAA expects and washed out the edges).
+ * - Bloom is intentional: the previous settings (strength 0.75, threshold 0.95
+ *   on a linear HDR buffer lit by a 2.2x environment) made every highlight bleed,
+ *   which is exactly the "the light hides the object" complaint. The threshold
+ *   now sits above diffuse white so only genuine specular sparkle blooms.
+ * - SSAO is opt-in and its parameters are expressed in world units that make
+ *   sense for a piece that is ~9 units wide.
  */
 export function setupPostprocessing(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
   camera: THREE.PerspectiveCamera,
   width: number,
-  height: number
+  height: number,
+  pixelRatio: number
 ): PostprocessingPipeline {
-  // 1. Tone Mapping Clamp: Strictly between 1.0 and 1.2
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.08; // strictly 1.08 within [1.0, 1.2]
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-  const pixelRatio = renderer.getPixelRatio();
-  const composer = new EffectComposer(renderer);
+  const renderTarget = new THREE.WebGLRenderTarget(
+    Math.max(1, Math.floor(width * pixelRatio)),
+    Math.max(1, Math.floor(height * pixelRatio)),
+    {
+      type: THREE.HalfFloatType,
+      samples: 4,
+      depthBuffer: true,
+      stencilBuffer: false,
+    }
+  );
+  renderTarget.texture.name = 'ComposerMSAA';
 
-  // 2. Render Pass
+  const composer = new EffectComposer(renderer, renderTarget);
+  composer.setPixelRatio(pixelRatio);
+  composer.setSize(width, height);
+
   const renderPass = new RenderPass(scene, camera);
   composer.addPass(renderPass);
 
-  // 3. SSAO Pass: Radius 0.15, Intensity 3.0 (Crucial to anchor text and prongs with deep black shadows)
+  // SSAO: opt-in only. `kernelRadius` is in world units, the defaults are tuned
+  // for a ~9 unit wide pendant so contact shadows stay subtle instead of
+  // drowning the micro-facets in black.
   const ssaoPass = new SSAOPass(scene, camera, width, height);
-  ssaoPass.kernelRadius = 0.15;
-  ssaoPass.minDistance = 0.005;
-  ssaoPass.maxDistance = 0.3;
-  // In SSAOPass, ssao material intensity / kernel control
-  if (ssaoPass.ssaoMaterial) {
-    // SSAO material uniforms
-  }
+  ssaoPass.kernelRadius = 0.18;
+  ssaoPass.minDistance = 0.002;
+  ssaoPass.maxDistance = 0.12;
+  ssaoPass.enabled = false;
   composer.addPass(ssaoPass);
 
-  // 4. Anti-Glare Bloom Constraint:
-  // Set Intensity to 0.8 maximum, Radius to 0.5, and Threshold to a high 0.95.
-  // Ensures only micro-facets sparkle without washing out 'William' text geometry.
   const bloomPass = new UnrealBloomPass(
     new THREE.Vector2(width, height),
-    0.75, // intensity (<= 0.8 maximum)
-    0.5,  // radius (0.5 as required)
-    0.95  // threshold (0.95 as required)
+    0.22, // strength
+    0.35, // radius
+    1.1 // threshold (linear HDR, above diffuse white)
   );
   composer.addPass(bloomPass);
 
-  // 5. FXAA Pass: pinned to anti-alias the micro-geometries of jewelry chains/prongs
-  const fxaaPass = new ShaderPass(FXAAShader);
-  fxaaPass.material.uniforms['resolution'].value.x = 1 / (width * pixelRatio);
-  fxaaPass.material.uniforms['resolution'].value.y = 1 / (height * pixelRatio);
-  composer.addPass(fxaaPass);
-
-  // 6. Output Pass for correct color space & tone mapping output
   const outputPass = new OutputPass();
   composer.addPass(outputPass);
-
-  const resize = (newWidth: number, newHeight: number) => {
-    const pr = renderer.getPixelRatio();
-    composer.setSize(newWidth, newHeight);
-    ssaoPass.setSize(newWidth, newHeight);
-    bloomPass.resolution.set(newWidth, newHeight);
-    fxaaPass.material.uniforms['resolution'].value.x = 1 / (newWidth * pr);
-    fxaaPass.material.uniforms['resolution'].value.y = 1 / (newHeight * pr);
-  };
-
-  const render = () => {
-    composer.render();
-  };
-
-  const setBloomIntensity = (val: number) => {
-    // Clamped strictly to 0.8 max
-    bloomPass.strength = Math.min(0.8, Math.max(0.0, val));
-  };
 
   return {
     composer,
     bloomPass,
     ssaoPass,
-    fxaaPass,
-    resize,
-    render,
-    setBloomIntensity,
+    setSize: (nextWidth, nextHeight, nextPixelRatio) => {
+      composer.setPixelRatio(nextPixelRatio);
+      composer.setSize(nextWidth, nextHeight);
+      ssaoPass.setSize(nextWidth * nextPixelRatio, nextHeight * nextPixelRatio);
+      // UnrealBloomPass.setSize already updates `resolution` internally
+      bloomPass.setSize(nextWidth * nextPixelRatio, nextHeight * nextPixelRatio);
+    },
+    render: () => composer.render(),
+    setBloom: (enabled) => {
+      bloomPass.enabled = enabled;
+    },
+    setBloomStrength: (strength) => {
+      bloomPass.strength = THREE.MathUtils.clamp(strength, 0, 0.8);
+    },
+    setSsao: (enabled) => {
+      ssaoPass.enabled = enabled;
+    },
+    setTransientDisabled: (disabled) => {
+      // used while capturing a transparent PNG: bloom/SSAO composite with
+      // additive blending and would leave a halo on the alpha channel
+      if (disabled) {
+        ssaoPass.enabled = false;
+        bloomPass.enabled = false;
+      }
+    },
+    dispose: () => {
+      renderPass.dispose?.();
+      ssaoPass.dispose?.();
+      bloomPass.dispose();
+      outputPass.dispose();
+      composer.dispose();
+      renderTarget.dispose();
+    },
   };
 }
