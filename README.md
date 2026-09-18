@@ -11,6 +11,8 @@ npm install
 npm run dev        # http://localhost:5173
 npm run build      # typecheck + bundle single-file in dist/index.html
 npm run preview
+npm run verify         # typecheck + smoke test UI + QA geometria/font/layout
+npm run verify:ui      # render dell'albero React in react-dom/server
 npm run verify:scene   # QA offline: geometria, font, layout + render software in tools/out
 npm run render:views   # render di tutte le viste con il rasterizzatore software
 ```
@@ -178,7 +180,16 @@ per le modifiche che avvengono al suo interno (click sul gioiello → `onSetting
 
 ## 4. QA offline
 
-`npm run verify:scene` compila i moduli "DOM-free" della scena con esbuild e verifica
+`npm run verify` esegue tre livelli:
+
+1. **`typecheck`** — `tsc --noEmit` con `strict` + `noUnusedLocals` + `noUnusedParameters`.
+2. **`verify:ui`** — l'albero React completo viene renderizzato con `react-dom/server`
+   (12 controlli): nessuna eccezione di render, overlay, canvas etichettato, tutti i pannelli presenti,
+   nessun `undefined`/`NaN` nel markup.
+3. **`verify:scene`** — 28 controlli sulla scena (sotto).
+
+
+`verify:scene` compila i moduli "DOM-free" della scena con esbuild e verifica
 (**28 controlli**, tutti verdi):
 
 - **Faceting**: ogni faccia di brillante e baguette è avvolta e orientata verso l'esterno (100%),
