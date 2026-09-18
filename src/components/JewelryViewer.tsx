@@ -271,6 +271,7 @@ export const JewelryViewer: React.FC = () => {
       >
         <canvas
           ref={canvasRef}
+          aria-label={`Vista 3D del gioiello: ciondolo con nome inciso ${settings.text.trim() || '—'}`}
           className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
         />
       </div>
@@ -452,9 +453,10 @@ export const JewelryViewer: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  setSettings(DEFAULT_SETTINGS);
-                  sceneRef.current?.applySettings(DEFAULT_SETTINGS);
-                  sceneRef.current?.setCameraView(DEFAULT_SETTINGS.cameraView);
+                  const defaults = { ...DEFAULT_SETTINGS };
+                  setSettings(defaults);
+                  sceneRef.current?.applySettings(defaults);
+                  sceneRef.current?.setCameraView(defaults.cameraView);
                 }}
                 className="w-full px-2 py-1.5 text-[10px] font-mono-cad uppercase border bg-zinc-950 text-zinc-400 border-white/12 hover:border-white/40"
               >

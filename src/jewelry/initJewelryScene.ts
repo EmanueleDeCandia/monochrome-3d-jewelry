@@ -9,6 +9,7 @@ import { computeFramingFov, computeViewDistance } from './cameraFraming';
 import {
   DEFAULT_SETTINGS,
   findCameraView,
+  findLighting,
   findQuality,
   type CameraViewId,
   type JewelrySettings,
@@ -332,7 +333,17 @@ export async function initJewelryScene(
     if (changed('gem')) materials.setGem(settings.gem);
     if (changed('nameplateMaterial')) assembly.setNameplateMaterial(settings.nameplateMaterial);
 
-    if (changed('lighting')) studio.setLightingPreset(settings.lighting);
+    if (changed('lighting')) {
+      studio.setLightingPreset(settings.lighting);
+      // keep the reported settings consistent: a lighting preset also picks
+      // its softbox layout and its environment intensity
+      const preset = findLighting(settings.lighting);
+      settings = {
+        ...settings,
+        envPreset: preset.envPreset,
+        envIntensity: preset.envIntensity,
+      };
+    }
     if (changed('envPreset')) studio.setEnvPreset(settings.envPreset);
     if (changed('envIntensity')) studio.setEnvIntensity(settings.envIntensity);
     if (changed('envRotation')) studio.setEnvRotation(settings.envRotation);

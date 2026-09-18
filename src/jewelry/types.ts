@@ -240,10 +240,10 @@ export interface BackdropPreset {
 }
 
 export const BACKDROPS: BackdropPreset[] = [
-  { id: 'black', label: 'Nero assoluto', css: '#000000', stops: ['#050505', '#000000', '#000000'] },
-  { id: 'charcoal', label: 'Grigio studio', css: '#101010', stops: ['#2a2a2a', '#141414', '#070707'] },
-  { id: 'cove', label: 'Infinity cove', css: '#050505', stops: ['#4a4a4a', '#161616', '#020202'] },
-  { id: 'halo', label: 'Halo zenitale', css: '#000000', stops: ['#6a6a6a', '#101010', '#000000'] },
+  { id: 'black', label: 'Nero', css: '#000000', stops: ['#050505', '#000000', '#000000'] },
+  { id: 'charcoal', label: 'Grigio', css: '#101010', stops: ['#2a2a2a', '#141414', '#070707'] },
+  { id: 'cove', label: 'Cove', css: '#050505', stops: ['#4a4a4a', '#161616', '#020202'] },
+  { id: 'halo', label: 'Halo', css: '#000000', stops: ['#6a6a6a', '#101010', '#000000'] },
 ];
 
 export type CameraViewId = 'hero' | 'front' | 'macro' | 'back' | 'top' | 'profile';

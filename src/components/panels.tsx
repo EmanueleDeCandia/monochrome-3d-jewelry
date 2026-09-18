@@ -15,7 +15,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { Panel, SectionTitle, SegmentedControl, Slider, ToggleRow } from './ui';
-import { FONT_IDS, FONT_PRESETS } from '../jewelry/fonts';
+import { FONT_IDS, FONT_PRESETS, getFontCoverage } from '../jewelry/fonts';
 import {
   BACKDROPS,
   FINISHES,
@@ -129,6 +129,11 @@ export const NameplatePanel: React.FC<PanelProps> = ({ settings, stats, patch, p
       format={(value) => `${(value * 100).toFixed(1)} em`}
     />
 
+    {settings.text.trim().length === 0 && (
+      <p className="text-[9px] font-mono-cad text-zinc-500 leading-snug">
+        La targhetta è vuota: scrivi un nome per generare l&apos;incisione 3D.
+      </p>
+    )}
     {stats.droppedChars.length > 0 && (
       <p className="text-[9px] font-mono-cad text-amber-200/80 leading-snug">
         Caratteri non presenti nel font e rimossi: {stats.droppedChars.join(' ')}
@@ -359,6 +364,7 @@ export const TelemetryPanel: React.FC<{ stats: SceneStats; settings: JewelrySett
         ['CORPO NOME', stats.fittedSize > 0 ? `${stats.fittedSize.toFixed(2)} u` : '—'],
         ['PIXEL RATIO', `${stats.renderScale.toFixed(2)}×`],
         ['FONT', FONT_PRESETS[settings.font].label],
+        ['GLIFI DISPONIBILI', `${getFontCoverage(settings.font).glyphs}`],
       ].map(([label, value]) => (
         <div key={label} className="flex justify-between gap-3 border-b border-white/5 pb-1">
           <dt>{label}</dt>

@@ -263,6 +263,93 @@ check(
   `${solitaires.length} solitari, ${baguettes.length} baguette`
 );
 
+
+/* ------------------------------------------------------------------ *
+ * 2c. procedural studio environment (browser APIs stubbed)
+ * ------------------------------------------------------------------ */
+console.log('\n=== Ambiente procedurale ===');
+
+const makeFakeCanvas = () => {
+  const ops = [];
+  const record = (name) => (...args) => {
+    ops.push(`${name}(${args.map((a) => (typeof a === 'number' ? a.toFixed(2) : String(a))).join(',')})`);
+  };
+  const gradient = () => ({ addColorStop: record('colorStop') });
+  const context = {
+    fillStyle: '',
+    fillRect: record('fillRect'),
+    beginPath: record('beginPath'),
+    ellipse: record('ellipse'),
+    arc: record('arc'),
+    fill: record('fill'),
+    createRadialGradient: (...args) => {
+      record('radialGradient')(...args);
+      return gradient();
+    },
+    createLinearGradient: (...args) => {
+      record('linearGradient')(...args);
+      return gradient();
+    },
+  };
+  const canvas = {
+    width: 0,
+    height: 0,
+    ops,
+    getContext: () => context,
+  };
+  return canvas;
+};
+
+const previousDocument = globalThis.document;
+const created = [];
+globalThis.document = {
+  createElement: (tag) => {
+    if (tag !== 'canvas') throw new Error(`unexpected element ${tag}`);
+    const canvas = makeFakeCanvas();
+    created.push(canvas);
+    return canvas;
+  },
+};
+
+const envSignatures = new Map();
+for (const id of ['studio', 'softbox', 'dome', 'noir']) {
+  const canvas = API.paintStudioEnvironment(id, 512);
+  const signature = canvas.ops.join('|').slice(0, 4000);
+  envSignatures.set(id, signature);
+  const gradients = canvas.ops.filter((op) => op.includes('Gradient(')).length;
+  const fills = canvas.ops.filter((op) => op.startsWith('fillRect(')).length;
+  check(
+    `IBL "${id}" generato`,
+    canvas.width === 512 &&
+      canvas.height === 256 &&
+      gradients >= 2 &&
+      fills >= 2 &&
+      canvas.ops.some((op) => op === 'fill()'),
+    `${canvas.ops.length} op, ${gradients} gradienti, ${fills} riempimenti`
+  );
+}
+
+const uniqueEnv = new Set(envSignatures.values());
+check(
+  'i 4 layout di softbox sono distinti',
+  uniqueEnv.size === 4,
+  `${uniqueEnv.size}/4 firme uniche`
+);
+
+const backdropSignatures = new Set();
+for (const backdrop of API.BACKDROPS) {
+  const texture = API.paintBackdrop(backdrop.stops);
+  backdropSignatures.add(texture.image ? texture.image.ops.join('|') : String(Math.random()));
+  texture.dispose();
+}
+check(
+  'i 4 fondali sono distinti',
+  backdropSignatures.size === API.BACKDROPS.length,
+  `${backdropSignatures.size}/${API.BACKDROPS.length} unici`
+);
+
+globalThis.document = previousDocument;
+
 const { renderScene } = await import('./softrender.mjs');
 
 /* ------------------------------------------------------------------ *

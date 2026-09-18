@@ -178,7 +178,8 @@ per le modifiche che avvengono al suo interno (click sul gioiello → `onSetting
 
 ## 4. QA offline
 
-`npm run verify:scene` compila i moduli "DOM-free" della scena con esbuild e verifica:
+`npm run verify:scene` compila i moduli "DOM-free" della scena con esbuild e verifica
+(**28 controlli**, tutti verdi):
 
 - **Faceting**: ogni faccia di brillante e baguette è avvolta e orientata verso l'esterno (100%),
   nessun `NaN`;
@@ -186,7 +187,9 @@ per le modifiche che avvengono al suo interno (click sul gioiello → `onSetting
   finestra del castone, caratteri mancanti segnalati;
 - **Copertura alfabeto** su tutti i font;
 - **Layout**: pavé esattamente sulla fascia del castone (0 pietre nella finestra), catena senza
-  anelli sovrapposti, nome dentro la finestra, solitari e baguette non collidenti.
+  anelli sovrapposti, nome dentro la finestra, solitari e baguette non collidenti;
+- **Ambiente procedurale**: i 4 layout di softbox e i 4 fondali vengono generati (2D canvas stubbato)
+  e producono risultati distinti.
 
 Poi rasterizza la geometria reale con un piccolo renderer software (`tools/softrender.mjs`) e salva
 i PNG in `tools/out/` per l'ispezione visiva, con la stessa matematica di inquadratura dell'app.

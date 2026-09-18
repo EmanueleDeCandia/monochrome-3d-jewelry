@@ -30,7 +30,7 @@ export interface StudioEnvironmentResult {
  * the project self-contained (0 assets, no network round-trip) and makes the
  * softbox layout switchable at runtime.
  */
-function paintStudioEnvironment(preset: EnvPresetId, width = 1024): HTMLCanvasElement {
+export function paintStudioEnvironment(preset: EnvPresetId, width = 1024): HTMLCanvasElement {
   const height = width / 2;
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -149,7 +149,7 @@ function equirectTexture(canvas: HTMLCanvasElement): THREE.CanvasTexture {
   return texture;
 }
 
-function paintBackdrop(stops: [string, string, string]): THREE.CanvasTexture {
+export function paintBackdrop(stops: [string, string, string]): THREE.CanvasTexture {
   const size = 512;
   const canvas = document.createElement('canvas');
   canvas.width = size;
