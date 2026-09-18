@@ -46,10 +46,16 @@ export function setupPostprocessing(
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
+  // NOTE: the render target is created in CSS pixels on purpose. EffectComposer
+  // stores `_width/_height` from this target and multiplies them by the pixel
+  // ratio on the next `setSize()`; allocating it in device pixels first would
+  // create a transient (width * pixelRatio^2) buffer - 4x the memory.
   const renderTarget = new THREE.WebGLRenderTarget(
-    Math.max(1, Math.floor(width * pixelRatio)),
-    Math.max(1, Math.floor(height * pixelRatio)),
+    Math.max(1, Math.floor(width)),
+    Math.max(1, Math.floor(height)),
     {
+      // HalfFloat keeps the HDR range that ACES + transmission need, MSAA x4
+      // replaces the FXAA the old pipeline applied on linear data.
       type: THREE.HalfFloatType,
       samples: 4,
       depthBuffer: true,
