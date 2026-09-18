@@ -9,6 +9,10 @@ Stack: **React 19 · TypeScript 5.9 · Vite 7 · three.js r186 · Tailwind CSS 4
 ```bash
 npm install
 npm run dev        # http://localhost:5173
+
+# in ambienti effimeri (sandbox/CI) dove node_modules e la storia git locale
+# non sopravvivono ai riavvii, questo script fa fetch + install + typecheck + dev
+bash tools/dev-restore.sh [porta]
 npm run build      # typecheck + bundle single-file in dist/index.html
 npm run preview
 npm run verify         # typecheck + smoke test UI + QA geometria/font/layout
