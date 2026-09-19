@@ -4,7 +4,8 @@ Visualizzatore 3D di un ciondolo personalizzabile: **platino inciso a nome**, ca
 pavé di brillanti, retro traforato a nido d'ape e catena cubana. Interfaccia in italiano,
 palette rigorosamente monocroma.
 
-Stack: **React 19 · TypeScript 5.9 · Vite 7 · three.js r186 · Tailwind CSS 4** (+ `lucide-react`, `clsx`, `tailwind-merge`).
+Stack: **React 19 · TypeScript 5.9 · Vite 7 · three.js r186 · Tailwind CSS 4** (+ `lucide-react`, `clsx`,
+`tailwind-merge`, `fflate` per l'archivio dei take).
 
 ```bash
 npm install
@@ -18,7 +19,9 @@ npm run preview
 npm run verify         # typecheck + smoke test UI + QA geometria/font/layout
 npm run verify:ui      # render dell'albero React in react-dom/server
 npm run verify:scene   # QA offline: geometria, font, layout + render software in tools/out
+npm run verify:motion  # QA regia: timeline, clip, otturatore, trasporto, take
 npm run render:views   # render di tutte le viste con il rasterizzatore software
+npm run render:take    # contact sheet di un clip: [clip] [nome] [font] [sub-frame]
 ```
 
 ---
@@ -149,7 +152,48 @@ Tre cause sovrapposte:
 - **Cattura**: 1×–4× (fino a 4096 px), sfondo trasparente, anteprima e download nominato.
 - **Scorciatoie**: `1…6` viste, `R` rotazione, `W` wireframe, `B` bloom, `C` cattura, `P` pannello,
   `H` nascondi interfaccia, `Esc` chiudi.
+- **Regia / motion control** (vedi §2.1): clip di ripresa con keyframe, motion blur reale da
+  integrazione sull'otturatore, profondità di campo e registrazione del take (video o sequenza PNG
+  con alpha e pass di profondità).
 - **Telemetria reale**: FPS, triangoli, oggetti, draw call, pietre, corpo calcolato, pixel ratio.
+
+### 2.1 Regia e take — come funziona
+
+L'idea portante è che **la ripresa è una funzione pura del tempo**: camera, piatto girevole e rig
+luci sono tracce di keyframe valutate a un istante `t` (`src/jewelry/timeline.ts`). Da questa
+proprietà discendono tutte le funzionalità:
+
+| Pezzo | Cosa fa | Dove |
+| --- | --- | --- |
+| `timeline.ts` | easings, tracce, 5 clip (Hero orbit, Push in, Gru zenitale, Reveal azurage, Profilo tecnico), matematica dell'otturatore | puro, testabile in Node |
+| `conductor.ts` | trasporto: play/pausa/stop, seek, step di fotogramma, loop, avanzamento a `deltaTime` | puro |
+| `postprocessing.ts` | accumulo additivo dei sub-frame + DOF (Bokeh) + bloom dopo l'integrazione | WebGL |
+| `takeRecorder.ts` | piano del take, sequenza PNG deterministica, codifica WebM in tempo reale, manifest | misto |
+
+- **Clip**: 5 movimenti preimpostati, ognuno con keyframe di camera (direzione + regione inquadrata),
+  rotazione del piatto e moltiplicatore delle luci. La camera usa la stessa matematica di framing
+  adattivo delle viste statiche: **nessun clip esce mai dall'inquadratura** (verificato a 240 campioni
+  per clip).
+- **Motion blur vero**: quando è attivo, ogni fotogramma viene reso `N` volte lungo l'intervallo
+  dell'otturatore (180° = mezzo fotogramma, come una macchina da presa) e i campioni sono **sommati**
+  in un render target half-float con blending additivo, poi passati a SSAO/bloom/DOF e al tone
+  mapping. Il blur è quindi un'integrazione sul tempo, non un filtro: se la camera è ferma il
+  fotogramma resta nitido, se il piatto gira le pietre strisciano. Costo: `N` render della scena per
+  fotogramma (2–8, regolabile).
+- **Profondità di campo**: `BokehPass` opzionale con distanza di fuoco, apertura e sfocatura massima
+  in unità di scena; spenta di default perché aggiunge un pass di profondità.
+- **Take**:
+  - *Video WebM/MP4* — `canvas.captureStream()` + `MediaRecorder`: la ripresa è in tempo reale, la
+    durata è quella del clip, il numero di fotogrammi dipende dalla GPU;
+  - *Sequenza PNG* — render fotogramma per fotogramma a 1×/2×/3× (max 4K), deterministico, con
+    motion blur integrato, opzionale **canale alpha** (fondale nascosto, clear alpha 0, effetti
+    additivi spenti) e **pass di profondità** (`MeshDepthMaterial` con `RGBADepthPacking`), più un
+    `manifest.json` con clip, fps, otturatore e canali. I file si scaricano singolarmente o in un
+    archivio ZIP (fflate) generato nel browser.
+- **Trasporto**: HUD sul viewport e pannello Regia con timeline scrubbabile, contatore fotogrammi e
+  timecode; scorciatoie `Spazio` (play/pausa), `←`/`→` (fotogramma), `S` (inizio), `K` (registra).
+  Durante la riproduzione OrbitControls è disattivato e riprende esattamente dalla posizione
+  raggiunta quando la regia si ferma.
 
 ---
 
@@ -169,7 +213,10 @@ src/
     gemstoneGeometry.ts  tagli sfaccettati con normali corrette
     materials.ts         libreria PBR monocroma condivisa
     studioEnvironment.ts IBL procedurale + faretti + fondale
-    postprocessing.ts    composer MSAA half-float + bloom + SSAO opzionale + OutputPass ACES
+    postprocessing.ts    composer MSAA half-float + bloom + SSAO + DOF + accumulo sub-frame
+    timeline.ts          motore della timeline: easings, tracce, clip, matematica dell'otturatore
+    conductor.ts         trasporto della ripresa (play/pausa/step/loop/seek)
+    takeRecorder.ts      registrazione dei take (sequenza PNG deterministica o video WebM)
     fonts/               typeface.json reali + registry
     types.ts             preset, impostazioni, limiti, statistiche
 tools/                   QA offline (harness + rasterizzatore software + generatore typeface)
@@ -184,13 +231,14 @@ per le modifiche che avvengono al suo interno (click sul gioiello → `onSetting
 
 ## 4. QA offline
 
-`npm run verify` esegue tre livelli:
+`npm run verify` esegue quattro livelli:
 
 1. **`typecheck`** — `tsc --noEmit` con `strict` + `noUnusedLocals` + `noUnusedParameters`.
 2. **`verify:ui`** — l'albero React completo viene renderizzato con `react-dom/server`
-   (12 controlli): nessuna eccezione di render, overlay, canvas etichettato, tutti i pannelli presenti,
-   nessun `undefined`/`NaN` nel markup.
+   (21 controlli): nessuna eccezione di render, overlay, canvas etichettato, tutti i pannelli presenti,
+   pannello regia con selettore clip/trasporto/otturatore/consegna, nessun `undefined`/`NaN` nel markup.
 3. **`verify:scene`** — 28 controlli sulla scena (sotto).
+4. **`verify:motion`** — 58 controlli su regia e take (sotto).
 
 
 `verify:scene` compila i moduli "DOM-free" della scena con esbuild e verifica
@@ -208,5 +256,28 @@ per le modifiche che avvengono al suo interno (click sul gioiello → `onSetting
 
 Poi rasterizza la geometria reale con un piccolo renderer software (`tools/softrender.mjs`) e salva
 i PNG in `tools/out/` per l'ispezione visiva, con la stessa matematica di inquadratura dell'app.
+
+`npm run render:take [clip] [nome] [font] [sub-frame]` produce un contact sheet del clip
+(6 fotogrammi) usando la timeline vera: è lo stesso motion blur del browser, ottenuto sommando i
+sub-frame anche sulla CPU. Utile per controllare un movimento senza aprire l'app.
+
+`verify:motion` verifica il motore di ripresa senza browser:
+
+- **Easing e tracce**: endpoint 0→1, monotonia, clamping fuori intervallo, interpolazione
+  scalare e vettoriale, sostituzione dei keyframe allo stesso tempo;
+- **Clip**: nessun `NaN`, camera sempre unitaria, **nessun clip esce dall'inquadratura**
+  (240 campioni per clip con la matematica di framing reale), durate plausibili e distinte;
+- **Loop e piatto**: il clip orbit compie esattamente 360° e chiude il loop senza scatto,
+  rotazione monotona, la camera resta ferma (il blur viene solo dal piatto), il push-in finisce
+  esattamente sulla vista macro;
+- **Otturatore**: 180° a 30 fps = 1/60 s, 360° = un fotogramma, 0° = nessuna integrazione;
+  sub-frame identici a camera ferma (nessun blur inventato), diversi quando il piatto gira;
+- **Trasporto**: play/pausa/seek/step/loop, fine del take one-shot con evento unico, cambio fps
+  che riallinea fotogrammi e durata;
+- **Take**: numerazione con padding, manifest coerente (incluso il caso "senza motion blur"),
+  simulazione completa di una registrazione PNG con dipendenze finte;
+- **Contratto del composer**: i flag `needsSwap` dei pass di three (che determinano in quale buffer
+  finisce l'immagine) e il percorso di accumulo vero, esercitato con un renderer finto: 4 campioni →
+  4 render della scena, `autoClear` spento durante la somma e ripristinato, otturatore usato corretto.
 
 Licenza dei font: vedi `LICENSES-fonts.md`.

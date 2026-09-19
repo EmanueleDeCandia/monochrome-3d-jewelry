@@ -1,21 +1,33 @@
 import React from 'react';
 import {
   Camera,
+  Circle,
+  Clapperboard,
   Contrast,
   Crosshair,
   Diamond,
+  Download,
+  Film,
   Gauge,
   Image as ImageIcon,
   Info,
   Layers,
   Lightbulb,
+  Pause,
+  Play,
   Ruler,
+  SkipBack,
+  SkipForward,
   Sparkles,
+  Square,
+  Timer,
   Type,
+  Video,
   Wand2,
 } from 'lucide-react';
 import { Panel, SectionTitle, SegmentedControl, Slider, ToggleRow } from './ui';
 import { FONT_IDS, FONT_PRESETS, getFontCoverage } from '../jewelry/fonts';
+import { type DirectorState, type TakeProgress, type TakeResult } from '../jewelry';
 import {
   BACKDROPS,
   FINISHES,
@@ -340,6 +352,398 @@ export const RenderPanel: React.FC<PanelProps> = ({ settings, patch, onCapture }
     />
   </Panel>
 );
+
+
+/* ------------------------------------------------------------------ *
+ * Regia (motion control): timeline, otturatore, take
+ * ------------------------------------------------------------------ */
+
+export interface DirectorPanelProps {
+  settings: JewelrySettings;
+  patch: (patch: Partial<JewelrySettings>) => void;
+  director: DirectorState;
+  progress: TakeProgress | null;
+  take: TakeResult | null;
+  onTransport: (command: 'play' | 'pause' | 'toggle' | 'stop' | 'prev' | 'next') => void;
+  onSeek: (time: number) => void;
+  onRecord: () => void;
+  onCancel: () => void;
+  onDownload: (file: TakeResult['files'][number]) => void;
+  onDownloadAll: () => void;
+}
+
+/** timecode SRT style: 00:04.13 */
+const timecode = (seconds: number) => {
+  const safe = Math.max(0, seconds);
+  const minutes = Math.floor(safe / 60);
+  const rest = safe - minutes * 60;
+  return `${String(minutes).padStart(2, '0')}:${rest.toFixed(2).padStart(5, '0')}`;
+};
+
+const formatBytes = (bytes: number) =>
+  bytes > 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} kB`;
+
+export const DirectorPanel: React.FC<DirectorPanelProps> = ({
+  settings,
+  patch,
+  director,
+  progress,
+  take,
+  onTransport,
+  onSeek,
+  onRecord,
+  onCancel,
+  onDownload,
+  onDownloadAll,
+}) => {
+  const recording = director.recording;
+  const frame = Math.round(director.time * director.fps);
+  const busy = progress !== null;
+
+  return (
+    <Panel>
+      <SectionTitle
+        icon={<Clapperboard className="w-3.5 h-3.5" />}
+        title="Regia · motion control"
+        hint="Camera, piatto girevole e luci sono funzioni del tempo: la ripresa è ripetibile"
+        right={
+          <span
+            className={
+              recording
+                ? 'text-[9px] font-mono-cad px-1.5 py-0.5 bg-red-500 text-black font-semibold animate-pulse'
+                : 'text-[9px] font-mono-cad px-1.5 py-0.5 border border-white/20 text-zinc-500'
+            }
+          >
+            {recording ? 'REC' : 'STBY'}
+          </span>
+        }
+      />
+
+      {/* clip ------------------------------------------------------ */}
+      <div className="text-[9px] font-mono-cad uppercase tracking-widest text-zinc-500">Clip</div>
+      <div className="grid grid-cols-1 gap-[3px]">
+        {director.clips.map((entry) => (
+          <button
+            key={entry.id}
+            type="button"
+            onClick={() => patch({ clip: entry.id })}
+            className={
+              entry.id === director.clip
+                ? 'px-2 py-1.5 text-left border bg-white text-black border-white'
+                : 'px-2 py-1.5 text-left border bg-zinc-950/70 text-zinc-300 border-white/12 hover:border-white/45'
+            }
+          >
+            <span className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-mono-cad uppercase tracking-wide truncate">
+                {entry.label}
+              </span>
+              <span
+                className={
+                  entry.id === director.clip
+                    ? 'text-[9px] font-mono-cad text-black/70'
+                    : 'text-[9px] font-mono-cad text-zinc-500'
+                }
+              >
+                {entry.duration}s{entry.loop ? ' ⟲' : ''}
+              </span>
+            </span>
+            <span
+              className={
+                entry.id === director.clip
+                  ? 'block text-[9px] font-mono-cad text-black/60 leading-snug'
+                  : 'block text-[9px] font-mono-cad text-zinc-500 leading-snug'
+              }
+            >
+              {entry.hint}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* trasporto ------------------------------------------------- */}
+      <div className="pt-1 space-y-1.5">
+        <div className="flex items-center justify-between text-[10px] font-mono-cad">
+          <span className="text-zinc-400 uppercase tracking-wide">Trasporto</span>
+          <span className="text-white font-semibold">
+            {timecode(director.time)} <span className="text-zinc-500">/ {timecode(director.duration)}</span>
+          </span>
+        </div>
+
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0.001, director.duration)}
+          step={1 / Math.max(1, director.fps)}
+          value={director.time}
+          onChange={(event) => onSeek(parseFloat(event.target.value))}
+          aria-label="Posizione nella timeline"
+          className="w-full h-1 appearance-none bg-zinc-800 accent-white cursor-pointer
+                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3
+                     [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white
+                     [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-black"
+        />
+        <div className="flex items-center justify-between text-[9px] font-mono-cad text-zinc-500">
+          <span>
+            fotogramma {String(Math.min(frame + 1, director.frames)).padStart(3, '0')} / {director.frames}
+          </span>
+          <span>
+            {director.fps} fps · {director.loop ? 'loop' : 'one-shot'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-4 gap-[3px]">
+          {[
+            { id: 'prev', icon: <SkipBack className="w-3.5 h-3.5" />, label: 'Fotogramma −', action: 'prev' as const },
+            {
+              id: 'toggle',
+              icon: director.playing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />,
+              label: director.playing ? 'Pausa' : 'Riproduci',
+              action: 'toggle' as const,
+            },
+            { id: 'next', icon: <SkipForward className="w-3.5 h-3.5" />, label: 'Fotogramma +', action: 'next' as const },
+            { id: 'stop', icon: <Square className="w-3.5 h-3.5" />, label: 'Torna a inizio', action: 'stop' as const },
+          ].map((control) => (
+            <button
+              key={control.id}
+              type="button"
+              title={control.label}
+              aria-label={control.label}
+              onClick={() => onTransport(control.action)}
+              className={
+                control.id === 'toggle'
+                  ? 'py-1.5 flex items-center justify-center border bg-white text-black border-white hover:bg-zinc-200'
+                  : 'py-1.5 flex items-center justify-center border bg-zinc-950/80 text-zinc-300 border-white/20 hover:border-white/60 hover:text-white'
+              }
+            >
+              {control.icon}
+            </button>
+          ))}
+        </div>
+        <ToggleRow
+          label="Loop del take"
+          hint="La riproduzione riavvolge invece di fermarsi"
+          checked={settings.loopTake}
+          onChange={(checked) => patch({ loopTake: checked })}
+        />
+        <div className="flex items-center gap-1 text-[9px] font-mono-cad text-zinc-500">
+          <Timer className="w-3 h-3" />
+          <span>
+            scorciatoie: spazio play/pausa · ← → fotogrammi · S inizio · K registra
+          </span>
+        </div>
+      </div>
+
+      {/* movimento ------------------------------------------------ */}
+      <div className="pt-1.5 space-y-2 border-t border-white/10">
+        <div className="text-[9px] font-mono-cad uppercase tracking-widest text-zinc-500">
+          Motion blur · otturatore
+        </div>
+        <ToggleRow
+          label="Integrazione sull'otturatore"
+          hint="Sub-frame reali sommati: è blur vero, non un filtro"
+          checked={settings.motionBlur}
+          onChange={(checked) => patch({ motionBlur: checked })}
+        />
+        <Slider
+          label="Angolo di otturatore"
+          value={settings.shutterAngle}
+          {...SETTINGS_LIMITS.shutterAngle}
+          onChange={(value) => patch({ shutterAngle: value })}
+          format={(value) => `${value.toFixed(0)}° (${(value / 360).toFixed(2)} fot.)`}
+        />
+        <Slider
+          label="Sub-frame per fotogramma"
+          value={settings.shutterSamples}
+          {...SETTINGS_LIMITS.shutterSamples}
+          onChange={(value) => patch({ shutterSamples: value })}
+          format={(value) => `${value.toFixed(0)} campioni`}
+        />
+
+        <div className="text-[9px] font-mono-cad uppercase tracking-widest text-zinc-500 pt-1">
+          Profondità di campo
+        </div>
+        <ToggleRow
+          label="DOF (bokeh)"
+          hint="Fuoco selettivo su placca e nome"
+          checked={settings.dof}
+          onChange={(checked) => patch({ dof: checked })}
+        />
+        <Slider
+          label="Distanza di fuoco"
+          value={settings.focusDistance}
+          {...SETTINGS_LIMITS.focusDistance}
+          onChange={(value) => patch({ focusDistance: value })}
+          format={(value) => `${value.toFixed(1)} u`}
+        />
+        <Slider
+          label="Apertura"
+          value={settings.dofAperture}
+          {...SETTINGS_LIMITS.dofAperture}
+          onChange={(value) => patch({ dofAperture: value })}
+          format={(value) => value.toFixed(5)}
+        />
+        <Slider
+          label="Sfocatura massima"
+          value={settings.dofMaxBlur}
+          {...SETTINGS_LIMITS.dofMaxBlur}
+          onChange={(value) => patch({ dofMaxBlur: value })}
+          format={(value) => value.toFixed(3)}
+        />
+      </div>
+
+      {/* take ----------------------------------------------------- */}
+      <div className="pt-1.5 space-y-2 border-t border-white/10">
+        <div className="text-[9px] font-mono-cad uppercase tracking-widest text-zinc-500">
+          Take · consegna
+        </div>
+        <SegmentedControl
+          options={[
+            { id: 'webm', label: 'Video WebM', hint: 'Ripresa in tempo reale, pronta da guardare' },
+            { id: 'png', label: 'Sequenza PNG', hint: 'Fotogramma-accurata, alpha e depth opzionali' },
+          ]}
+          value={settings.takeFormat}
+          onChange={(id) => patch({ takeFormat: id })}
+          columns={2}
+          size="sm"
+        />
+        <Slider
+          label="Fotogrammi al secondo"
+          value={settings.takeFps}
+          {...SETTINGS_LIMITS.takeFps}
+          onChange={(value) => patch({ takeFps: value })}
+          format={(value) => `${value.toFixed(0)} fps`}
+        />
+        {settings.takeFormat === 'png' ? (
+          <>
+            <div className="text-[9px] font-mono-cad uppercase tracking-widest text-zinc-500">
+              Risoluzione sequenza
+            </div>
+            <SegmentedControl
+              options={[
+                { id: '1', label: '1×', hint: 'Dimensione del viewport' },
+                { id: '2', label: '2×', hint: 'Doppia risoluzione (max 4K sul lato lungo)' },
+                { id: '3', label: '3×', hint: 'Massima qualità' },
+              ]}
+              value={String(settings.takeScale)}
+              onChange={(id) => patch({ takeScale: Number(id) })}
+              columns={3}
+              size="sm"
+            />
+            <ToggleRow
+              label="Fondo trasparente (alpha)"
+              hint="Il compositor può bucare il fondale"
+              checked={settings.takeTransparent}
+              onChange={(checked) => patch({ takeTransparent: checked })}
+            />
+            <ToggleRow
+              label="Pass di profondità"
+              hint="Seconda serie di frame con depth packed"
+              checked={settings.takeDepth}
+              onChange={(checked) => patch({ takeDepth: checked })}
+            />
+          </>
+        ) : null}
+
+        <div className="grid grid-cols-2 gap-[3px] pt-1">
+          <button
+            type="button"
+            onClick={onRecord}
+            disabled={busy || recording}
+            className={
+              busy || recording
+                ? 'px-2 py-2 text-[10px] font-mono-cad uppercase border bg-zinc-900 text-zinc-500 border-white/12 cursor-not-allowed flex items-center justify-center gap-1.5'
+                : 'px-2 py-2 text-[10px] font-mono-cad uppercase border bg-red-500 text-black border-red-500 font-semibold hover:bg-red-400 flex items-center justify-center gap-1.5'
+            }
+          >
+            <Circle className="w-3 h-3" /> Registra
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={!busy}
+            className={
+              busy
+                ? 'px-2 py-2 text-[10px] font-mono-cad uppercase border bg-white text-black border-white font-semibold hover:bg-zinc-200 flex items-center justify-center gap-1.5'
+                : 'px-2 py-2 text-[10px] font-mono-cad uppercase border bg-zinc-950 text-zinc-500 border-white/12 cursor-not-allowed flex items-center justify-center gap-1.5'
+            }
+          >
+            <Square className="w-3 h-3" /> Annulla
+          </button>
+        </div>
+
+        {progress ? (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[9px] font-mono-cad text-zinc-400">
+              <span className="uppercase tracking-wide">
+                {progress.phase === 'encode' ? 'codifica' : progress.phase === 'depth' ? 'depth + beauty' : 'render'}
+              </span>
+              <span>
+                {progress.frame} / {progress.total}
+              </span>
+            </div>
+            <div className="h-1 bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full bg-white transition-[width] duration-150"
+                style={{ width: `${Math.min(100, (progress.frame / Math.max(1, progress.total)) * 100)}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
+
+        {take ? (
+          <div className="space-y-1.5 pt-0.5">
+            <div className="flex items-center justify-between text-[9px] font-mono-cad">
+              <span className="text-zinc-400 uppercase tracking-wide flex items-center gap-1">
+                {take.format === 'webm' ? <Video className="w-3 h-3" /> : <Film className="w-3 h-3" />}
+                ultimo take · {take.frames} fotogrammi
+              </span>
+              <button
+                type="button"
+                onClick={onDownloadAll}
+                className="px-1.5 py-0.5 border bg-white text-black border-white font-semibold uppercase flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" /> ZIP
+              </button>
+            </div>
+            <ul className="max-h-32 overflow-y-auto space-y-[2px] pr-1">
+              {take.files.slice(0, 60).map((file) => (
+                <li key={file.name}>
+                  <button
+                    type="button"
+                    onClick={() => onDownload(file)}
+                    className="w-full flex items-center justify-between gap-2 px-1.5 py-1 border border-white/10 bg-zinc-950/60 text-left hover:border-white/40"
+                  >
+                    <span className="text-[9px] font-mono-cad text-zinc-300 truncate">{file.name}</span>
+                    <span className="text-[9px] font-mono-cad text-zinc-500 shrink-0">
+                      {formatBytes(file.size)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {take.files.length > 60 ? (
+              <div className="text-[9px] font-mono-cad text-zinc-500">
+                … e altri {take.files.length - 60} fotogrammi: usa lo ZIP per scaricare tutto
+              </div>
+            ) : null}
+            {take.notes.map((note) => (
+              <div key={note} className="text-[9px] font-mono-cad text-zinc-500 leading-snug">
+                · {note}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-[9px] font-mono-cad text-zinc-600 leading-snug">
+            Nessun take registrato. Il take usa il clip selezionato, gli fps e le opzioni
+            dell'otturatore qui sopra.
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+};
 
 /* ------------------------------------------------------------------ *
  * Telemetry

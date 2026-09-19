@@ -8,15 +8,18 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm run verify:ui && npm run verify:scene",
+    "verify": "npm run typecheck && npm run verify:ui && npm run verify:scene && npm run verify:motion",
     "verify:ui": "node tools/verify-ui.mjs",
     "verify:scene": "node tools/verify-scene.mjs",
     "render:views": "node tools/render-views.mjs",
-    "typefaces": "node tools/generate-typefaces.mjs"
+    "typefaces": "node tools/generate-typefaces.mjs",
+    "verify:motion": "node tools/verify-motion.mjs",
+    "render:take": "node tools/render-take.mjs"
   },
   "dependencies": {
     "@types/three": "^0.186.0",
     "clsx": "2.1.1",
+    "fflate": "^0.8.3",
     "lucide-react": "^1.47.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
@@ -35,5 +38,5 @@
     "vite": "^7.3.6",
     "vite-plugin-singlefile": "2.3.0"
   },
-  "description": "Studio CAD 3D monocromo: ciondolo personalizzabile con nome inciso, pav\u00e9 di brillanti e catena cubana (React + three.js)."
+  "description": "Studio CAD 3D monocromo: ciondolo personalizzabile con nome inciso, pavé di brillanti e catena cubana (React + three.js)."
 }

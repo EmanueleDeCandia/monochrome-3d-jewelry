@@ -12,8 +12,23 @@ import {
   Sliders,
   Sparkles,
   X,
+  Circle,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Square,
 } from 'lucide-react';
+import { zipSync } from 'fflate';
 import { initJewelryScene, type CaptureOptions, type JewelrySceneHandle } from '../jewelry/initJewelryScene';
+import {
+  CLIP_PRESETS,
+  findClip,
+  frameCountOf,
+  takeDuration,
+} from '../jewelry/timeline';
+import type { DirectorState } from '../jewelry/initJewelryScene';
+import type { TakeFile, TakePlan, TakeProgress, TakeResult } from '../jewelry/takeRecorder';
 import {
   CAMERA_VIEWS,
   DEFAULT_SETTINGS,
@@ -28,6 +43,7 @@ import {
   MaterialsPanel,
   NameplatePanel,
   RenderPanel,
+  DirectorPanel,
   SnapshotMeta,
   SpecsTable,
   TelemetryPanel,
@@ -48,6 +64,15 @@ const EMPTY_STATS: SceneStats = {
   droppedChars: [],
   renderScale: 1,
 };
+
+/** riassunto dei clip per lo stato iniziale, prima che la scena sia pronta */
+const CLIP_SUMMARY = CLIP_PRESETS.map((clip) => ({
+  id: clip.id,
+  label: clip.label,
+  hint: clip.hint,
+  duration: clip.duration,
+  loop: clip.loop,
+}));
 
 interface Snapshot {
   url: string;
@@ -76,6 +101,24 @@ export const JewelryViewer: React.FC = () => {
   const [captureScale, setCaptureScale] = useState<2 | 3 | 4>(2);
   const [captureTransparent, setCaptureTransparent] = useState(false);
 
+  const [director, setDirector] = useState<DirectorState>(() => ({
+    clip: DEFAULT_SETTINGS.clip,
+    clipLabel: findClip(DEFAULT_SETTINGS.clip).label,
+    clips: CLIP_SUMMARY,
+    time: 0,
+    duration: findClip(DEFAULT_SETTINGS.clip).duration,
+    frames: frameCountOf(findClip(DEFAULT_SETTINGS.clip), DEFAULT_SETTINGS.takeFps),
+    fps: DEFAULT_SETTINGS.takeFps,
+    playing: false,
+    recording: false,
+    progress: 0,
+    loop: DEFAULT_SETTINGS.loopTake,
+  }));
+  const [takeProgress, setTakeProgress] = useState<TakeProgress | null>(null);
+  const [take, setTake] = useState<TakeResult | null>(null);
+  // i blob del take non sono serializzabili: vivono in un ref
+  const takeFilesRef = useRef<TakeFile[]>([]);
+
   // latest settings, readable from async callbacks without re-creating them
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -88,6 +131,7 @@ export const JewelryViewer: React.FC = () => {
     if (!canvas) return;
 
     let disposed = false;
+    let directorUnsubscribe: (() => void) | null = null;
 
     void initJewelryScene(canvas, {
       initialSettings: settingsRef.current,
@@ -105,6 +149,13 @@ export const JewelryViewer: React.FC = () => {
         }
         sceneRef.current = handle;
         handle.applySettings(settingsRef.current);
+        // la scena pubblica lo stato della regia (trasporto, avanzamento take)
+        const unsubscribeState = handle.director.onState(setDirector);
+        const unsubscribeProgress = handle.director.onProgress(setTakeProgress);
+        directorUnsubscribe = () => {
+          unsubscribeState();
+          unsubscribeProgress();
+        };
         setStatus('ready');
       })
       .catch((error: unknown) => {
@@ -116,10 +167,118 @@ export const JewelryViewer: React.FC = () => {
 
     return () => {
       disposed = true;
+      directorUnsubscribe?.();
       sceneRef.current?.dispose();
       sceneRef.current = null;
     };
   }, []);
+
+  /* ---------------------------------------------------------------- *
+   * Regia: trasporto, registrazione dei take, download
+   * ---------------------------------------------------------------- */
+  const handleTransport = useCallback(
+    (command: 'play' | 'pause' | 'toggle' | 'stop' | 'prev' | 'next') => {
+      const directorApi = sceneRef.current?.director;
+      if (!directorApi) return;
+      if (command === 'prev') directorApi.step(-1);
+      else if (command === 'next') directorApi.step(1);
+      else directorApi[command]();
+    },
+    []
+  );
+
+  const handleSeek = useCallback((time: number) => {
+    sceneRef.current?.director.seek(time);
+  }, []);
+
+  const buildPlan = useCallback((): TakePlan => {
+    const current = settingsRef.current;
+    const clip = findClip(current.clip);
+    const fps = Math.max(1, Math.round(current.takeFps));
+    const frames = frameCountOf(clip, fps);
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, '')
+      .replace(/\.\d+Z$/, '')
+      .slice(4);
+    return {
+      clipId: clip.id,
+      clipLabel: clip.label,
+      duration: takeDuration(clip, fps),
+      fps,
+      frames,
+      format: current.takeFormat,
+      scale: current.takeScale,
+      motionBlur: current.motionBlur && current.shutterAngle > 0 && current.shutterSamples > 1,
+      shutterAngle: current.shutterAngle,
+      samples: Math.max(1, Math.round(current.shutterSamples)),
+      transparent: current.takeTransparent && current.takeFormat === 'png',
+      depth: current.takeDepth && current.takeFormat === 'png',
+      prefix: `${clip.id}_${fps}fps_${stamp}`,
+    };
+  }, []);
+
+  const [takeError, setTakeError] = useState<string | null>(null);
+
+  const handleRecord = useCallback(async () => {
+    const directorApi = sceneRef.current?.director;
+    if (!directorApi || directorApi.state().recording) return;
+    const plan = buildPlan();
+    setTakeError(null);
+    // il take precedente non serve più: libero i blob prima di riempirne altri
+    takeFilesRef.current.forEach((file) => URL.revokeObjectURL(file.url));
+    takeFilesRef.current = [];
+    setTake(null);
+    try {
+      const result = await directorApi.record(plan);
+      takeFilesRef.current = result.files;
+      setTake(result);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        takeFilesRef.current = [];
+        setTake(null);
+        return;
+      }
+      setTakeError(error instanceof Error ? error.message : 'Registrazione non riuscita');
+    }
+  }, [buildPlan]);
+
+  const handleCancelTake = useCallback(() => {
+    sceneRef.current?.director.cancel();
+  }, []);
+
+  const saveBlob = useCallback((blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    // il browser ha già preso il file: rilascio differito per sicurezza
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }, []);
+
+  const handleDownload = useCallback(
+    async (file: TakeFile) => {
+      const response = await fetch(file.url);
+      saveBlob(await response.blob(), file.name);
+    },
+    [saveBlob]
+  );
+
+  const handleDownloadAll = useCallback(async () => {
+    const files = takeFilesRef.current;
+    if (!files.length) return;
+    const archive: Record<string, Uint8Array> = {};
+    for (const file of files) {
+      const response = await fetch(file.url);
+      archive[file.name] = new Uint8Array(await response.arrayBuffer());
+    }
+    const zipped = zipSync(archive, { level: 0 });
+    const label = files[0]?.name.replace(/_\d{4}\.(png|webm|mp4)$/, '') ?? 'take';
+    saveBlob(new Blob([zipped], { type: 'application/zip' }), `${label}.zip`);
+  }, [saveBlob]);
 
   /* ---------------------------------------------------------------- *
    * Settings plumbing
@@ -223,7 +382,24 @@ export const JewelryViewer: React.FC = () => {
         return;
       }
 
+      if (event.code === 'Space') {
+        event.preventDefault();
+        sceneRef.current?.director.toggle();
+        return;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        sceneRef.current?.director.step(event.key === 'ArrowRight' ? 1 : -1);
+        return;
+      }
+
       switch (event.key.toLowerCase()) {
+        case 's':
+          sceneRef.current?.director.stop();
+          break;
+        case 'k':
+          void handleRecord();
+          break;
         case 'r':
           patch({ autoRotate: !settingsRef.current.autoRotate });
           break;
@@ -254,7 +430,7 @@ export const JewelryViewer: React.FC = () => {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleCameraView, handleCapture, patch]);
+  }, [handleCameraView, handleCapture, handleRecord, patch]);
 
   const quality = findQuality(settings.quality);
 
@@ -275,6 +451,17 @@ export const JewelryViewer: React.FC = () => {
           className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
         />
       </div>
+
+      {director.recording || takeProgress ? (
+        <div className="absolute inset-0 z-30 pointer-events-none ring-2 ring-inset ring-red-500/70">
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-black/85 border border-red-500/70 backdrop-blur-md">
+            <span className="w-2 h-2 bg-red-500 animate-pulse" />
+            <span className="text-[10px] font-mono-cad uppercase tracking-[0.2em] text-white">
+              {takeProgress ? `Registrazione ${takeProgress.frame}/${takeProgress.total}` : 'REC'}
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       {/* Loading / error overlay */}
       {status !== 'ready' && (
@@ -419,6 +606,19 @@ export const JewelryViewer: React.FC = () => {
             <NameplatePanel {...panelProps} />
             <MaterialsPanel {...panelProps} />
             <LightingPanel {...panelProps} />
+            <DirectorPanel
+              settings={settings}
+              patch={patch}
+              director={director}
+              progress={takeProgress}
+              take={take}
+              onTransport={handleTransport}
+              onSeek={handleSeek}
+              onRecord={() => void handleRecord()}
+              onCancel={handleCancelTake}
+              onDownload={(file) => void handleDownload(file)}
+              onDownloadAll={() => void handleDownloadAll()}
+            />
             <RenderPanel {...panelProps} onCapture={handleCapture} />
             <TelemetryPanel stats={stats} settings={settings} />
 
@@ -484,6 +684,100 @@ export const JewelryViewer: React.FC = () => {
             ))}
           </div>
 
+
+          {/* HUD di ripresa: trasporto sempre a portata di mano */}
+          {uiVisible && status === 'ready' ? (
+            <div
+              className={cn(
+                'absolute bottom-16 md:bottom-14 left-3 md:left-6 z-20 transition-[right] duration-300 pointer-events-none',
+                panelOpen ? 'right-3 sm:right-[22rem]' : 'right-3 sm:right-6'
+              )}
+            >
+              <div className="flex flex-wrap items-center gap-2 px-2.5 py-2 bg-black/75 border border-white/12 backdrop-blur-xl pointer-events-auto">
+                <button
+                  type="button"
+                  title={director.playing ? 'Pausa (spazio)' : 'Riproduci (spazio)'}
+                  aria-label={director.playing ? 'Pausa' : 'Riproduci'}
+                  onClick={() => handleTransport('toggle')}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center border bg-white text-black border-white hover:bg-zinc-200"
+                >
+                  {director.playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                </button>
+                <button
+                  type="button"
+                  title="Fotogramma precedente (←)"
+                  aria-label="Fotogramma precedente"
+                  onClick={() => handleTransport('prev')}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center border bg-zinc-950/80 text-zinc-300 border-white/20 hover:border-white/60"
+                >
+                  <SkipBack className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title="Fotogramma successivo (→)"
+                  aria-label="Fotogramma successivo"
+                  onClick={() => handleTransport('next')}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center border bg-zinc-950/80 text-zinc-300 border-white/20 hover:border-white/60"
+                >
+                  <SkipForward className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title="Torna all'inizio (S)"
+                  aria-label="Torna all'inizio"
+                  onClick={() => handleTransport('stop')}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center border bg-zinc-950/80 text-zinc-300 border-white/20 hover:border-white/60"
+                >
+                  <Square className="w-3.5 h-3.5" />
+                </button>
+
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0.001, director.duration)}
+                  step={1 / Math.max(1, director.fps)}
+                  value={director.time}
+                  onChange={(event) => handleSeek(parseFloat(event.target.value))}
+                  aria-label="Posizione nella timeline"
+                  className="flex-1 min-w-[8rem] h-1 appearance-none bg-zinc-800 accent-white cursor-pointer
+                             [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3
+                             [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white
+                             [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-black"
+                />
+
+                <span className="shrink-0 text-[10px] font-mono-cad text-zinc-300 tabular-nums">
+                  {director.time.toFixed(2)}s
+                  <span className="text-zinc-500">/{director.duration.toFixed(2)}s</span>
+                </span>
+                <span className="shrink-0 text-[9px] font-mono-cad uppercase tracking-wider text-zinc-500">
+                  {director.clipLabel}
+                </span>
+
+                <button
+                  type="button"
+                  title="Registra il take (K)"
+                  onClick={() => void handleRecord()}
+                  disabled={takeProgress !== null}
+                  className={cn(
+                    'shrink-0 flex items-center gap-1.5 px-2 py-1.5 border text-[10px] font-mono-cad uppercase tracking-wide',
+                    takeProgress !== null
+                      ? 'bg-zinc-900 text-zinc-500 border-white/12 cursor-not-allowed'
+                      : 'bg-red-500 text-black border-red-500 font-semibold hover:bg-red-400'
+                  )}
+                >
+                  <Circle className="w-3 h-3" />
+                  {takeProgress ? `${takeProgress.frame}/${takeProgress.total}` : 'Rec'}
+                </button>
+              </div>
+
+              {takeError ? (
+                <div className="mt-1 px-2 py-1 text-[10px] font-mono-cad text-black bg-white border border-white">
+                  {takeError}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           {/* Status strip */}
           {(status === 'ready' || stats.fps > 0) && (
             <div
@@ -521,6 +815,10 @@ export const JewelryViewer: React.FC = () => {
           <ul className="text-[11px] font-mono-cad text-zinc-400 space-y-1.5">
             {[
               ['1 … 6', 'viste camera'],
+              ['Spazio', 'play / pausa del take'],
+              ['← →', 'fotogramma avanti/indietro'],
+              ['S', 'torna all\'inizio'],
+              ['K', 'registra il take'],
               ['R', 'rotazione automatica'],
               ['W', 'wireframe CAD'],
               ['B', 'bloom'],
