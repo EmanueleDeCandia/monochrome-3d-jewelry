@@ -10,3 +10,4 @@ export * from './cameraFraming';
 export * from './timeline';
 export * from './conductor';
 export * from './takeRecorder';
+export * from './motionEstimate';

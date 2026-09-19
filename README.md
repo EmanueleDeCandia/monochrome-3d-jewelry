@@ -194,6 +194,21 @@ proprietà discendono tutte le funzionalità:
   timecode; scorciatoie `Spazio` (play/pausa), `←`/`→` (fotogramma), `S` (inizio), `K` (registra).
   Durante la riproduzione OrbitControls è disattivato e riprende esattamente dalla posizione
   raggiunta quando la regia si ferma.
+- **Strisciata misurata** (`motionEstimate.ts`): sotto i controlli dell'otturatore il pannello scrive
+  quanti **pixel** si sposta il soggetto durante l'otturatore al playhead corrente, calcolati
+  proiettando il bordo del ciondolo con la camera del fotogramma. Serve a rispondere a "il motion
+  blur si sta vedendo?" prima di registrare: a 30 fps con otturatore 180° il clip Hero orbit produce
+  ~8 px su 1440 (visibile ma sottile), un push-in ~1 px (quasi impercettibile), e sotto il pixel la UI
+  lo dichiara e suggerisce di alzare l'angolo o rallentare gli fps.
+- **Consegna robusta**: il take si guarda **dentro l'app** (finestra "Guarda il take": video con i
+  controlli per WebM/MP4, griglia dei fotogrammi con anteprima a schermo intero per le sequenze PNG,
+  più il manifest). Il salvataggio prova nell'ordine il dialogo di sistema (File System Access), poi
+  il classico `<a download>`, e riporta all'utente *quale* strada ha usato. Ogni file si può aprire in
+  una scheda nuova, dove «Salva con nome» del browser funziona sempre — necessario perché le preview
+  dentro un iframe possono bloccare i download diretti senza dare alcun errore. Il pannello mostra
+  anche una diagnostica dell'ambiente (video disponibile, dialogo di salvataggio, iframe) e avvisa se
+  la scheda è in background durante una ripresa video.
+  L'archivio ZIP si ferma a 250 MB invece di saturare la memoria della scheda.
 
 ---
 
@@ -238,7 +253,7 @@ per le modifiche che avvengono al suo interno (click sul gioiello → `onSetting
    (21 controlli): nessuna eccezione di render, overlay, canvas etichettato, tutti i pannelli presenti,
    pannello regia con selettore clip/trasporto/otturatore/consegna, nessun `undefined`/`NaN` nel markup.
 3. **`verify:scene`** — 28 controlli sulla scena (sotto).
-4. **`verify:motion`** — 58 controlli su regia e take (sotto).
+4. **`verify:motion`** — 73 controlli su regia, take e consegna dei file (sotto).
 
 
 `verify:scene` compila i moduli "DOM-free" della scena con esbuild e verifica
@@ -278,6 +293,11 @@ sub-frame anche sulla CPU. Utile per controllare un movimento senza aprire l'app
   simulazione completa di una registrazione PNG con dipendenze finte;
 - **Contratto del composer**: i flag `needsSwap` dei pass di three (che determinano in quale buffer
   finisce l'immagine) e il percorso di accumulo vero, esercitato con un renderer finto: 4 campioni →
-  4 render della scena, `autoClear` spento durante la somma e ripristinato, otturatore usato corretto.
+  4 render della scena, `autoClear` spento durante la somma e ripristinato, otturatore usato corretto;
+- **Stima della strisciata**: nulla a scena identica, crescente con l'angolo di otturatore, dichiarata
+  trascurabile sotto il pixel, descrizione leggibile per la UI;
+- **Consegna dei file**: con DOM finto vengono esercitati i percorsi reali — dialogo di sistema che
+  scrive davvero, annullamento dell'utente che non attiva altri percorsi, permesso negato che ricade
+  sul download classico, assenza del dialogo, apertura in scheda nuova sempre gestita.
 
 Licenza dei font: vedi `LICENSES-fonts.md`.

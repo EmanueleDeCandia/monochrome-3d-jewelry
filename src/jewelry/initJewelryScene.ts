@@ -8,6 +8,7 @@ import { setupStudioLighting, type StudioEnvironmentResult } from './studioEnvir
 import { computeFramingFov, computeViewDistance } from './cameraFraming';
 import { Conductor } from './conductor';
 import { CLIP_PRESETS, findClip, shutterSpan, type RigState } from './timeline';
+import { describeShutter, estimateShutterTravel } from './motionEstimate';
 import {
   TakeRecorder,
   type TakePlan,
@@ -52,6 +53,15 @@ export interface DirectorState {
   loop: boolean;
   /** dimensione del canvas: serve a stimare il peso della sequenza */
   viewport: { width: number; height: number };
+  /** quanto si muove il soggetto durante l'otturatore, in pixel di schermo */
+  shutter: {
+    pixels: number;
+    span: number;
+    spinDegrees: number;
+    negligible: boolean;
+    still: boolean;
+    text: string;
+  };
 }
 
 export interface JewelrySceneHandle {
@@ -441,7 +451,17 @@ export async function initJewelryScene(
         maxblur: settings.dofMaxBlur,
       });
     }
-    if (changed('clip') || changed('takeFps') || changed('loopTake')) emitDirector();
+    if (
+      changed('clip') ||
+      changed('takeFps') ||
+      changed('loopTake') ||
+      changed('motionBlur') ||
+      changed('shutterAngle') ||
+      changed('shutterSamples') ||
+      changed('takeScale')
+    ) {
+      emitDirector();
+    }
 
     if (changed('autoRotate')) controls.autoRotate = settings.autoRotate;
     if (changed('autoRotateSpeed')) controls.autoRotateSpeed = settings.autoRotateSpeed * 2;
@@ -495,6 +515,15 @@ export async function initJewelryScene(
     progress: conductor.progress,
     loop: conductor.looping,
     viewport: { width, height },
+    shutter: (() => {
+      const span = settings.motionBlur ? shutterSpan(conductor.fpsValue, settings.shutterAngle) : 0;
+      const estimate = estimateShutterTravel(
+        (time) => conductor.rigAt(time),
+        conductor.time,
+        { span, aspect: camera.aspect, viewportWidth: width, viewportHeight: height }
+      );
+      return { ...estimate, text: describeShutter(estimate, width) };
+    })(),
   });
 
   const emitDirector = (force = true) => {
@@ -647,7 +676,19 @@ export async function initJewelryScene(
         conductor.play();
         emitDirector();
       }),
-    nextTick: () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    nextTick: () =>
+      new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        requestAnimationFrame(finish);
+        // se la scheda è in background requestAnimationFrame non arriva mai:
+        // un timer evita che la sequenza resti bloccata a metà
+        setTimeout(finish, 50);
+      }),
     now: () => performance.now(),
   });
 

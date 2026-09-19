@@ -50,6 +50,13 @@ import {
   type PanelProps,
 } from './panels';
 import { Toolbar } from './ui';
+import { TakeViewer } from './TakeViewer';
+import {
+  describeEnvironment,
+  openInNewTab,
+  saveBlobSafely,
+  type DeliveryEnvironment,
+} from '../utils/delivery';
 import { cn } from '../utils/cn';
 
 const EMPTY_STATS: SceneStats = {
@@ -114,11 +121,23 @@ export const JewelryViewer: React.FC = () => {
     progress: 0,
     loop: DEFAULT_SETTINGS.loopTake,
     viewport: { width: 1440, height: 810 },
+    shutter: {
+      pixels: 0,
+      span: 0,
+      spinDegrees: 0,
+      negligible: false,
+      still: true,
+      text: 'in attesa della scena…',
+    },
   }));
   const [takeProgress, setTakeProgress] = useState<TakeProgress | null>(null);
   const [take, setTake] = useState<TakeResult | null>(null);
   // i blob del take non sono serializzabili: vivono in un ref
   const takeFilesRef = useRef<TakeFile[]>([]);
+  const [takeOpen, setTakeOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [environment] = useState<DeliveryEnvironment>(() => describeEnvironment());
 
   // latest settings, readable from async callbacks without re-creating them
   const settingsRef = useRef(settings);
@@ -226,6 +245,15 @@ export const JewelryViewer: React.FC = () => {
     if (!directorApi || directorApi.state().recording) return;
     const plan = buildPlan();
     setTakeError(null);
+    setSaveStatus(null);
+    setTakeOpen(false);
+    if (plan.format === 'webm' && typeof document !== 'undefined' && document.hidden) {
+      setTakeError(
+        'La ripresa video richiede la scheda in primo piano (il browser non disegna le schede nascoste). ' +
+          'La sequenza PNG invece procede anche in background.'
+      );
+      return;
+    }
     // il take precedente non serve più: libero i blob prima di riempirne altri
     takeFilesRef.current.forEach((file) => URL.revokeObjectURL(file.url));
     takeFilesRef.current = [];
@@ -234,6 +262,8 @@ export const JewelryViewer: React.FC = () => {
       const result = await directorApi.record(plan);
       takeFilesRef.current = result.files;
       setTake(result);
+      // il take si guarda subito: non deve dipendere dal download
+      setTakeOpen(true);
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         takeFilesRef.current = [];
@@ -248,50 +278,92 @@ export const JewelryViewer: React.FC = () => {
     sceneRef.current?.director.cancel();
   }, []);
 
-  const saveBlob = useCallback((blob: Blob, name: string) => {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = name;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    // il browser ha già preso il file: rilascio differito per sicurezza
-    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
-  }, []);
-
-  const handleDownload = useCallback(
-    async (file: TakeFile) => {
-      const response = await fetch(file.url);
-      saveBlob(await response.blob(), file.name);
+  /** messaggio unico per spiegare *cosa* è successo a un salvataggio */
+  const reportSave = useCallback(
+    (outcome: 'picker' | 'anchor' | 'cancelled' | 'failed', name: string) => {
+      if (outcome === 'picker') setSaveStatus(`${name} salvato.`);
+      else if (outcome === 'anchor')
+        setSaveStatus(
+          environment.embedded
+            ? `Download di ${name} avviato… se non compare nulla, la preview blocca i download: usa «Apri in scheda» e poi tasto destro → Salva.`
+            : `Download di ${name} avviato: controlla la cartella dei download.`
+        );
+      else if (outcome === 'failed')
+        setSaveStatus(
+          `Il browser ha rifiutato il salvataggio di ${name}: usa «Apri in scheda» e poi tasto destro → Salva.`
+        );
+      else setSaveStatus(null);
     },
-    [saveBlob]
+    [environment.embedded]
+  );
+
+  const handleSave = useCallback(
+    async (file: TakeFile) => {
+      try {
+        const response = await fetch(file.url);
+        const blob = await response.blob();
+        const outcome = await saveBlobSafely(blob, file.name);
+        reportSave(outcome, file.name);
+      } catch (error) {
+        setSaveStatus(
+          `Non riesco a preparare ${file.name}: ${error instanceof Error ? error.message : 'errore'}. Usa «Apri in scheda».`
+        );
+      }
+    },
+    [reportSave]
+  );
+
+  const handleOpenFile = useCallback(
+    (file: TakeFile) => {
+      const opened = openInNewTab(file.url);
+      setSaveStatus(
+        opened
+          ? `${file.name} aperto in una scheda nuova: da lì il tasto destro → «Salva con nome…» funziona sempre.`
+          : 'Il browser ha bloccato l\'apertura della scheda: consenti i popup per questo sito, oppure prova il pulsante «Salva».'
+      );
+    },
+    []
   );
 
   /** oltre questa soglia l'archivio in memoria non vale il rischio */
-  const ZIP_BUDGET = 400 * 1024 * 1024;
+  const ZIP_BUDGET = 250 * 1024 * 1024;
 
   const handleDownloadAll = useCallback(async () => {
     const files = takeFilesRef.current;
     if (!files.length) return;
     const total = files.reduce((sum, file) => sum + file.size, 0);
     if (total > ZIP_BUDGET) {
-      setTakeError(
+      setSaveStatus(
         `Il take pesa ${(total / (1024 * 1024)).toFixed(0)} MB: troppo per un archivio in memoria. ` +
-          'Scarica i fotogrammi singolarmente o ripeti la registrazione a risoluzione più bassa.'
+          'Apri i fotogrammi dalla griglia e salvali singolarmente, oppure ripeti la registrazione a risoluzione più bassa.'
       );
       return;
     }
-    setTakeError(null);
-    const archive: Record<string, Uint8Array> = {};
-    for (const file of files) {
-      const response = await fetch(file.url);
-      archive[file.name] = new Uint8Array(await response.arrayBuffer());
+
+    setBundleBusy(true);
+    setSaveStatus('Archivio in preparazione…');
+    try {
+      const archive: Record<string, Uint8Array> = {};
+      for (const file of files) {
+        const response = await fetch(file.url);
+        archive[file.name] = new Uint8Array(await response.arrayBuffer());
+      }
+      const zipped = zipSync(archive, { level: 0 });
+      const label = files[0]?.name.replace(/_\d{4}\.(png|webm|mp4)$/, '') ?? 'take';
+      const outcome = await saveBlobSafely(
+        new Blob([zipped], { type: 'application/zip' }),
+        `${label}.zip`
+      );
+      reportSave(outcome, `${label}.zip`);
+    } catch (error) {
+      setSaveStatus(
+        `Archivio non riuscito: ${error instanceof Error ? error.message : 'errore sconosciuto'}. ` +
+          'Salva i singoli fotogrammi dalla griglia.'
+      );
+    } finally {
+      setBundleBusy(false);
     }
-    const zipped = zipSync(archive, { level: 0 });
-    const label = files[0]?.name.replace(/_\d{4}\.(png|webm|mp4)$/, '') ?? 'take';
-    saveBlob(new Blob([zipped], { type: 'application/zip' }), `${label}.zip`);
-  }, [saveBlob]);
+  }, [reportSave]);
 
   /* ---------------------------------------------------------------- *
    * Settings plumbing
@@ -629,8 +701,9 @@ export const JewelryViewer: React.FC = () => {
               onSeek={handleSeek}
               onRecord={() => void handleRecord()}
               onCancel={handleCancelTake}
-              onDownload={(file) => void handleDownload(file)}
-              onDownloadAll={() => void handleDownloadAll()}
+              onOpenTake={() => setTakeOpen(true)}
+              onSave={(file) => void handleSave(file)}
+              onSaveAll={() => void handleDownloadAll()}
             />
             <RenderPanel {...panelProps} onCapture={handleCapture} />
             <TelemetryPanel stats={stats} settings={settings} />
@@ -850,6 +923,20 @@ export const JewelryViewer: React.FC = () => {
           </ul>
         </div>
       )}
+
+      {/* Take viewer: il take si guarda dentro l'app */}
+      {takeOpen && take ? (
+        <TakeViewer
+          take={take}
+          onClose={() => setTakeOpen(false)}
+          onSave={(file) => void handleSave(file)}
+          onSaveAll={() => void handleDownloadAll()}
+          onOpen={handleOpenFile}
+          status={saveStatus}
+          bundleBusy={bundleBusy}
+          environment={environment}
+        />
+      ) : null}
 
       {/* Specifications modal */}
       {specsOpen && (

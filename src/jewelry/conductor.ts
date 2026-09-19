@@ -61,6 +61,10 @@ export class Conductor {
     return this.clip;
   }
 
+  get fpsValue(): number {
+    return this.fps;
+  }
+
   get frames(): number {
     return frameCountOf(this.clip, this.fps);
   }

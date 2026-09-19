@@ -79,7 +79,7 @@ export interface RecorderDeps {
   capturePng: () => Promise<Blob>;
   /** avvia la riproduzione del take; si risolve a fine take (o su abort) */
   playTake: () => Promise<void>;
-  /** cede il controllo al browser (rAF) */
+  /** cede il controllo al browser (rAF, con rete di sicurezza se la scheda è nascosta) */
   nextTick: () => Promise<void>;
   now: () => number;
   /** mapping MIME disponibile, in ordine di preferenza */
@@ -266,10 +266,13 @@ export class TakeRecorder {
       const mimeType =
         TakeRecorder.pickVideoMimeType(
           this.deps.videoMimeTypes ?? [
-            'video/mp4;codecs=avc1.42E01E',
+            // WebM per primo: è il contenitore che i browser registrano in modo
+            // affidabile; MP4 su MediaRecorder è supportato a macchia di leopardo
             'video/webm;codecs=vp9',
             'video/webm;codecs=vp8',
             'video/webm',
+            'video/mp4;codecs=avc1.42E01E',
+            'video/mp4',
           ]
         ) ?? 'video/webm';
       const recorder = new MediaRecorder(stream, { mimeType });
@@ -282,7 +285,7 @@ export class TakeRecorder {
         recorder.onstop = () => resolve();
       });
 
-      recorder.start();
+      recorder.start(500);
       this.abortController.signal.addEventListener('abort', () => {
         try {
           recorder.stop();
@@ -312,6 +315,12 @@ export class TakeRecorder {
       }
 
       const blob = new Blob(chunks, { type: mimeType.split(';')[0] });
+      if (blob.size === 0) {
+        throw new Error(
+          'Il registratore non ha prodotto dati: tieni la scheda in primo piano durante la ripresa ' +
+            'o usa la sequenza PNG, che è deterministica.'
+        );
+      }
       const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
       notes.push(
         'Ripresa in tempo reale: la durata è quella del clip, il numero di fotogrammi dipende dalla GPU.'

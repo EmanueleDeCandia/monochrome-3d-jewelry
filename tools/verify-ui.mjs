@@ -80,6 +80,9 @@ const expectations = [
   ['consegna take (video + sequenza)', /Video WebM[\s\S]*Sequenza PNG/],
   ['pulsante di registrazione', /Registra/],
   ['stima del peso del take prima di registrare', /fotogrammi[\s\S]{0,80}~[\s\S]{0,20}(kB|MB)/],
+  ['misura della strisciata sull\'otturatore', /Strisciata misurata/],
+  ['diagnostica di consegna', /Diagnostica consegna[\s\S]{0,200}dialogo di salvataggio/],
+  ['tempo di otturatore esplicitato in millisecondi', /otturatore[\s\S]{0,220}campionati in[\s\S]{0,60}passaggi/],
   ['HUD di ripresa attivo sul viewport', /Posizione nella timeline/],
   ['scorciatoia play/pausa documentata', /scorciatoie: spazio play\/pausa[\s\S]{0,60}fotogrammi[\s\S]{0,40}K registra/],
 ];

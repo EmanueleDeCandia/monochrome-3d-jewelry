@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   Camera,
   Circle,
@@ -26,6 +26,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { Panel, SectionTitle, SegmentedControl, Slider, ToggleRow } from './ui';
+import { describeEnvironment } from './TakeViewer';
 import { FONT_IDS, FONT_PRESETS, getFontCoverage } from '../jewelry/fonts';
 import { type DirectorState, type TakeProgress, type TakeResult } from '../jewelry';
 import {
@@ -368,8 +369,10 @@ export interface DirectorPanelProps {
   onSeek: (time: number) => void;
   onRecord: () => void;
   onCancel: () => void;
-  onDownload: (file: TakeResult['files'][number]) => void;
-  onDownloadAll: () => void;
+  /** apre il visualizzatore del take (video riprodotto o griglia fotogrammi) */
+  onOpenTake: () => void;
+  onSave: (file: TakeResult['files'][number]) => void;
+  onSaveAll: () => void;
 }
 
 /** timecode SRT style: 00:04.13 */
@@ -399,8 +402,9 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
   onSeek,
   onRecord,
   onCancel,
-  onDownload,
-  onDownloadAll,
+  onOpenTake,
+  onSave,
+  onSaveAll,
 }) => {
   const recording = director.recording;
   const frame = Math.round(director.time * director.fps);
@@ -417,6 +421,7 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
         )
       : 0;
   const heavyTake = settings.takeFormat === 'png' && projectedSize > 300 * 1024 * 1024;
+  const environment = useMemo(() => describeEnvironment(), []);
 
   return (
     <Panel>
@@ -577,6 +582,36 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
           format={(value) => `${value.toFixed(0)} campioni`}
         />
 
+        {/* misura, non promessa: quanto si muove il soggetto durante l'otturatore */}
+        <div className="px-2 py-1.5 border border-white/12 bg-black/40 space-y-0.5">
+          <div className="flex items-center justify-between text-[9px] font-mono-cad">
+            <span className="text-zinc-500 uppercase tracking-wide">Strisciata misurata</span>
+            <span
+              className={
+                settings.motionBlur
+                  ? director.shutter.negligible
+                    ? 'text-amber-400'
+                    : 'text-white font-semibold'
+                  : 'text-zinc-500'
+              }
+            >
+              {settings.motionBlur
+                ? `${director.shutter.pixels < 1 ? '<1' : director.shutter.pixels.toFixed(1)} px`
+                : 'integrazione spenta'}
+            </span>
+          </div>
+          <div className="text-[9px] font-mono-cad text-zinc-500 leading-snug">
+            {settings.motionBlur
+              ? director.shutter.text
+              : 'Attiva l\'integrazione per misurare lo spostamento sull\'otturatore.'}
+          </div>
+          <div className="text-[9px] font-mono-cad text-zinc-600 leading-snug">
+            otturatore {settings.shutterAngle.toFixed(0)}° a {director.fps} fps ={' '}
+            {(settings.shutterAngle / 360 / Math.max(1, director.fps) * 1000).toFixed(1)} ms, campionati in{' '}
+            {settings.shutterSamples} passaggi.
+          </div>
+        </div>
+
         <div className="text-[9px] font-mono-cad uppercase tracking-widest text-zinc-500 pt-1">
           Profondità di campo
         </div>
@@ -662,6 +697,20 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
           </>
         ) : null}
 
+        <div className="px-2 py-1.5 border border-white/12 bg-black/40 space-y-0.5">
+          <div className="text-[9px] font-mono-cad uppercase tracking-wide text-zinc-500">
+            Diagnostica consegna
+          </div>
+          <div className="text-[9px] font-mono-cad text-zinc-400 leading-snug">
+            video: {environment.mediaRecorder && environment.captureStream ? 'disponibile' : 'non disponibile'} ·
+            dialogo di salvataggio: {environment.savePicker ? 'sì' : 'no'} ·{' '}
+            {environment.embedded ? 'dentro un iframe (i download diretti possono essere bloccati)' : 'pagina diretta'}
+          </div>
+          <div className="text-[9px] font-mono-cad text-zinc-600 leading-snug">
+            In ogni caso il take si guarda in-app: apri «Guarda il take» dopo la registrazione.
+          </div>
+        </div>
+
         <div className="flex items-center justify-between text-[9px] font-mono-cad">
           <span className="text-zinc-500 uppercase tracking-wide">Questo take</span>
           <span className={heavyTake ? 'text-amber-400' : 'text-zinc-400'}>
@@ -731,25 +780,39 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
                 {take.format === 'webm' ? <Video className="w-3 h-3" /> : <Film className="w-3 h-3" />}
                 ultimo take · {take.frames} fotogrammi
               </span>
+              <span className="text-zinc-500">
+                {formatBytes(take.files.reduce((sum, file) => sum + file.size, 0))}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-[3px]">
+              <button
+                type="button"
+                onClick={onOpenTake}
+                className="px-2 py-1.5 text-[10px] font-mono-cad uppercase border bg-white text-black border-white font-semibold hover:bg-zinc-200 flex items-center justify-center gap-1.5"
+              >
+                {take.format === 'webm' ? <Video className="w-3.5 h-3.5" /> : <Film className="w-3.5 h-3.5" />}
+                Guarda il take
+              </button>
               <button
                 type="button"
                 title="Scarica tutti i file del take in un archivio ZIP"
-                onClick={onDownloadAll}
-                className="px-1.5 py-0.5 border bg-white text-black border-white font-semibold uppercase flex items-center gap-1"
+                onClick={onSaveAll}
+                className="px-2 py-1.5 text-[10px] font-mono-cad uppercase border bg-zinc-950 text-zinc-300 border-white/20 hover:border-white/60 flex items-center justify-center gap-1.5"
               >
-                <Download className="w-3 h-3" /> ZIP
+                <Download className="w-3.5 h-3.5" /> ZIP
               </button>
             </div>
-            <div className="text-[9px] font-mono-cad text-zinc-500">
-              {formatBytes(take.files.reduce((sum, file) => sum + file.size, 0))} in totale ·{' '}
-              {take.width}×{take.height} px
+            <div className="text-[9px] font-mono-cad text-zinc-500 leading-snug">
+              Il take si riproduce nella finestra «Guarda il take»: video con i controlli, oppure griglia dei
+              fotogrammi con anteprima a schermo intero. Ogni file si può aprire in una scheda nuova e salvare da lì
+              (tasto destro → Salva con nome), utile se l'ambiente blocca i download diretti.
             </div>
-            <ul className="max-h-32 overflow-y-auto space-y-[2px] pr-1">
-              {take.files.slice(0, 60).map((file) => (
+            <ul className="max-h-24 overflow-y-auto space-y-[2px] pr-1">
+              {take.files.slice(0, 12).map((file) => (
                 <li key={file.name}>
                   <button
                     type="button"
-                    onClick={() => onDownload(file)}
+                    onClick={() => onSave(file)}
                     className="w-full flex items-center justify-between gap-2 px-1.5 py-1 border border-white/10 bg-zinc-950/60 text-left hover:border-white/40"
                   >
                     <span className="text-[9px] font-mono-cad text-zinc-300 truncate">{file.name}</span>
@@ -760,16 +823,11 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
                 </li>
               ))}
             </ul>
-            {take.files.length > 60 ? (
+            {take.files.length > 12 ? (
               <div className="text-[9px] font-mono-cad text-zinc-500">
-                … e altri {take.files.length - 60} fotogrammi: usa lo ZIP per scaricare tutto
+                … e altri {take.files.length - 12} file nel visualizzatore
               </div>
             ) : null}
-            {take.notes.map((note) => (
-              <div key={note} className="text-[9px] font-mono-cad text-zinc-500 leading-snug">
-                · {note}
-              </div>
-            ))}
           </div>
         ) : (
           <div className="text-[9px] font-mono-cad text-zinc-600 leading-snug">

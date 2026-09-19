@@ -41,8 +41,24 @@ execFileSync(
   { stdio: 'inherit' }
 );
 
+const deliveryBundle = path.join(outDir, 'delivery.bundle.mjs');
+execFileSync(
+  path.join(repo, 'node_modules/esbuild/bin/esbuild'),
+  [
+    path.join(repo, 'src/utils/delivery.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=neutral',
+    '--target=es2022',
+    `--outfile=${deliveryBundle}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' }
+);
+
 const THREE = await import(path.join(repo, 'node_modules/three/build/three.module.js'));
 const API = await import(bundlePath);
+const Delivery = await import(deliveryBundle);
 
 const results = [];
 const check = (name, ok, detail = '') => {
@@ -540,6 +556,146 @@ const SAMPLES = 240;
   pipeline.renderMotionBlurred(1, 3, 3, () => {});
   check('con un solo campione non si somma nulla', sceneDraws() === 1, `${sceneDraws()} render della scena`);
   pipeline.dispose();
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 10. stima dell'otturatore (dice se il blur si vedrà davvero)
+ * ------------------------------------------------------------------ */
+{
+  const {
+    estimateShutterTravel,
+    screenTravel,
+    describeShutter,
+    SUBJECT_RADIUS,
+  } = API;
+
+  const orbit = compileClip(findClip('orbit'));
+  const still = compileClip(findClip('orbit'));
+  const rigAt = (t) => evaluateClip(orbit, t);
+  const viewport = { aspect: 16 / 9, viewportWidth: 1440, viewportHeight: 810 };
+
+  const travel = screenTravel(rigAt(0), rigAt(0), viewport.aspect, 1440, 810);
+  check('a scena identica lo spostamento è nullo', travel === 0, `${travel} px`);
+
+  const moving = screenTravel(rigAt(0), rigAt(1), viewport.aspect, 1440, 810);
+  check('un secondo di piatto girevole sposta il soggetto di molti pixel', moving > 20, `${moving.toFixed(1)} px`);
+  check('il raggio del soggetto è una costante dichiarata', SUBJECT_RADIUS === 4.3);
+
+  const estimate = estimateShutterTravel(rigAt, 4, { span: shutterSpan(30, 180), ...viewport });
+  check(
+    'la stima a 30 fps con otturatore 180° è dell\'ordine dei pixel',
+    estimate.pixels > 1 && estimate.pixels < 40 && !estimate.still,
+    `${estimate.pixels.toFixed(1)} px su 1440, piatto ${estimate.spinDegrees.toFixed(2)}°`
+  );
+  check('la stima sa dire quando la scena è ferma', estimateShutterTravel(() => evaluateClip(still, 0), 0, { span: 1 / 60, ...viewport }).still);
+
+  const short = estimateShutterTravel(rigAt, 4, { span: shutterSpan(60, 5), ...viewport });
+  const long = estimateShutterTravel(rigAt, 4, { span: shutterSpan(24, 360), ...viewport });
+  check(
+    'la strisciata cresce con l\'angolo di otturatore',
+    long.pixels > estimate.pixels && estimate.pixels > short.pixels,
+    `${short.pixels.toFixed(2)} < ${estimate.pixels.toFixed(2)} < ${long.pixels.toFixed(2)} px`
+  );
+  check('sotto il pixel la stima si dichiara trascurabile', short.negligible && !long.negligible);
+  check(
+    'la descrizione per la UI è leggibile',
+    /px su 1440/.test(describeShutter(estimate, 1440)) && /ferma/.test(describeShutter({ still: true }, 1440)),
+    describeShutter(estimate, 1440)
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * 11. consegna dei file (iframe, dialogo di sistema, fallback)
+ * ------------------------------------------------------------------ */
+{
+  const { describeEnvironment, saveBlobSafely, openInNewTab } = Delivery;
+  const blob = new Blob([new Uint8Array(16)], { type: 'image/png' });
+
+  // --- ambiente: nessuna finestra (render server-side) ---
+  check('senza finestra l\'ambiente non dichiara capacità', describeEnvironment().savePicker === false);
+
+  // --- DOM finto per esercitare i percorsi reali ---
+  let clicked = 0;
+  let written = 0;
+  let aborted = false;
+  const restore = { window: globalThis.window, document: globalThis.document, URL: globalThis.URL };
+
+  const installDom = ({ picker }) => {
+    globalThis.window = {
+      self: {},
+      top: {},
+      setTimeout: () => 0,
+      open: () => ({}),
+      showSaveFilePicker: picker,
+    };
+    globalThis.window.self = globalThis.window.self ?? {};
+    globalThis.document = {
+      createElement: () => ({
+        set href(value) {},
+        set download(value) {},
+        set rel(value) {},
+        click: () => {
+          clicked++;
+        },
+        remove: () => {},
+      }),
+      body: { appendChild: () => {} },
+    };
+    globalThis.URL = { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} };
+  };
+
+  // 1. dialogo di sistema disponibile → percorso 'picker'
+  installDom({
+    picker: async () => ({
+      createWritable: async () => ({
+        write: async () => {
+          written++;
+        },
+        close: async () => {},
+      }),
+    }),
+  });
+  const pickerOutcome = await saveBlobSafely(blob, 'take_0001.png');
+  check('con il dialogo di sistema il file viene scritto davvero', pickerOutcome === 'picker' && written === 1, `esito ${pickerOutcome}`);
+
+  // 2. dialogo annullato dall'utente → nessun fallback a sorpresa
+  installDom({
+    picker: async () => {
+      const error = new Error('annullato');
+      error.name = 'AbortError';
+      throw error;
+    },
+  });
+  const cancelOutcome = await saveBlobSafely(blob, 'take_0002.png');
+  check('annullare il dialogo non attiva altri percorsi', cancelOutcome === 'cancelled' && clicked === 0, `esito ${cancelOutcome}, click ${clicked}`);
+
+  // 3. dialogo vietato dall'ambiente (iframe) → si ricade sull'anchor
+  installDom({
+    picker: async () => {
+      const error = new Error('non permesso');
+      error.name = 'NotAllowedError';
+      throw error;
+    },
+  });
+  const anchorOutcome = await saveBlobSafely(blob, 'take_0003.png');
+  check('se il dialogo è vietato si prova il download classico', anchorOutcome === 'anchor' && clicked === 1, `esito ${anchorOutcome}, click ${clicked}`);
+
+  // 4. nessun dialogo disponibile → anchor diretto
+  installDom({ picker: undefined });
+  const plain = await saveBlobSafely(blob, 'take_0004.png');
+  check('senza dialogo si usa il download classico', plain === 'anchor' && clicked === 2, `esito ${plain}, click ${clicked}`);
+
+  // 5. l'apertura in scheda nuova non lancia mai
+  installDom({ picker: undefined });
+  check('l\'apertura in scheda nuova è gestita', openInNewTab('blob:test') === true && openInNewTab('') === true);
+
+  // 6. ambiente: iframe rilevato e dialogo dichiarato
+  const env = describeEnvironment();
+  check('l\'ambiente rileva il dialogo di salvataggio', env.savePicker === false && typeof env.embedded === 'boolean', JSON.stringify(env));
+
+  Object.assign(globalThis, restore);
+  void aborted;
 }
 
 /* ------------------------------------------------------------------ *
