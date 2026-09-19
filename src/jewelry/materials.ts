@@ -1,88 +1,228 @@
 import * as THREE from 'three';
-
-export interface JewelryMaterials {
-  platinum: THREE.MeshStandardMaterial;
-  matteDarkMetal: THREE.MeshStandardMaterial;
-  pureDiamond: THREE.MeshPhysicalMaterial;
-  obsidian: THREE.MeshPhysicalMaterial;
-  rhodiumSilver: THREE.MeshStandardMaterial;
-  goldWhite18k: THREE.MeshStandardMaterial;
-}
+import {
+  findFinish,
+  findGem,
+  findMetal,
+  type FinishId,
+  type GemId,
+  type MetalId,
+} from './types';
 
 /**
- * STRICT MONOCHROME PBR MATRIX
- * Guaranteed pure shades of gray / white / black. No color hues allowed.
+ * Monochrome PBR material library.
+ *
+ * Design notes
+ * ------------
+ * - One shared instance per "slot" (metal / dark metal / gem / accent gem).
+ *   Materials are mutated in place, so a slider instantly updates every mesh
+ *   using them. The previous implementation only swapped the material of the
+ *   text mesh, which is why most of the UI produced no visible change.
+ * - Everything stays strictly neutral: grey tones only, `dispersion` = 0.
+ * - `transparent` is intentionally NOT enabled on gems: three.js renders
+ *   transmission in a dedicated pass and alpha blending on top of it produces
+ *   sorting artefacts (the old code enabled it).
  */
-export function createMonochromeJewelryMaterials(): JewelryMaterials {
-  // 1. Platinum / Polished Silver: #FFFFFF, Roughness: 0.02, Metalness: 1.0, Transmission: 0.0
-  const platinum = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#FFFFFF'),
-    roughness: 0.02,
-    metalness: 1.0,
-    envMapIntensity: 2.2,
-  });
+export interface MaterialLibrary {
+  metal: THREE.MeshPhysicalMaterial;
+  darkMetal: THREE.MeshPhysicalMaterial;
+  gem: THREE.MeshPhysicalMaterial;
+  accentGem: THREE.MeshPhysicalMaterial;
+  /** clones used by the nameplate so it can be styled independently */
+  textMetal: THREE.MeshPhysicalMaterial;
+  textGem: THREE.MeshPhysicalMaterial;
+  setMetal: (id: MetalId) => void;
+  setFinish: (id: FinishId) => void;
+  setGem: (id: GemId) => void;
+  setWireframe: (enabled: boolean) => void;
+  all: () => THREE.Material[];
+  dispose: () => void;
+}
 
-  // 2. Matte Dark Metal: #1A1A1A, Roughness: 0.40, Metalness: 1.0, Transmission: 0.0
-  const matteDarkMetal = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#1A1A1A'),
-    roughness: 0.40,
-    metalness: 1.0,
-    envMapIntensity: 1.1,
-  });
+const grey = (hex: string) => new THREE.Color(hex);
 
-  // 3. Pure Diamond (Gemstone): #FFFFFF, Roughness: 0.00, Metalness: 0.0, Transmission: 1.0, IOR: 2.417, Clearcoat: 1.0, thickness: 0.8
-  const pureDiamond = new THREE.MeshPhysicalMaterial({
-    color: new THREE.Color('#FFFFFF'),
-    roughness: 0.0,
-    metalness: 0.0,
-    transmission: 1.0,
-    ior: 2.417, // Crucial diamond refraction index
-    thickness: 0.8,
-    clearcoat: 1.0,
-    clearcoatRoughness: 0.0,
-    transparent: true,
-    opacity: 1.0,
-    reflectivity: 1.0,
-    attenuationColor: new THREE.Color('#FFFFFF'),
-    attenuationDistance: 2.0,
-    envMapIntensity: 2.4,
-  });
+export function createMaterialLibrary(): MaterialLibrary {
+  let metalId: MetalId = 'platinum';
+  let finishId: FinishId = 'polished';
+  let gemId: GemId = 'diamond';
 
-  // 4. Obsidian / Black Gem: #050505, Roughness: 0.05, Metalness: 0.0, Transmission: 0.0, IOR: 1.450, Clearcoat: 1.0
-  const obsidian = new THREE.MeshPhysicalMaterial({
-    color: new THREE.Color('#050505'),
-    roughness: 0.05,
-    metalness: 0.0,
-    transmission: 0.0,
-    ior: 1.450,
-    clearcoat: 1.0,
-    clearcoatRoughness: 0.02,
-    reflectivity: 0.9,
-    envMapIntensity: 1.8,
-  });
-
-  // Polished Rhodium White Silver (extra bright specular highlights)
-  const rhodiumSilver = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#F0F0F0'),
-    roughness: 0.04,
-    metalness: 0.98,
-    envMapIntensity: 2.0,
-  });
-
-  // High Polish Titanium (slightly deeper gunmetal monochrome)
-  const goldWhite18k = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#D8D8D8'),
+  const metal = new THREE.MeshPhysicalMaterial({
+    name: 'metal',
+    color: grey('#f2f2f2'),
+    metalness: 1,
     roughness: 0.06,
-    metalness: 0.95,
-    envMapIntensity: 1.9,
+    clearcoat: 0.15,
+    clearcoatRoughness: 0.08,
+    // NOTE: three.js overrides envMapIntensity with scene.environmentIntensity
+    // whenever `material.envMap === null`, so the global IBL control lives on
+    // the Scene (see studioEnvironment.ts).
+    envMapIntensity: 1,
   });
+
+  const darkMetal = new THREE.MeshPhysicalMaterial({
+    name: 'darkMetal',
+    color: grey('#3a3a3a'),
+    metalness: 0.9,
+    roughness: 0.42,
+    envMapIntensity: 1,
+  });
+
+  const gem = new THREE.MeshPhysicalMaterial({
+    name: 'gem',
+    color: grey('#ffffff'),
+    metalness: 0,
+    roughness: 0.005,
+    transmission: 1,
+    ior: 2.417,
+    thickness: 0.6,
+    clearcoat: 1,
+    clearcoatRoughness: 0,
+    attenuationColor: grey('#ffffff'),
+    attenuationDistance: 4,
+    envMapIntensity: 1,
+    // guarantees crisp micro-facets no matter how the geometry was cut
+    flatShading: true,
+  });
+
+  const accentGem = new THREE.MeshPhysicalMaterial({
+    name: 'accentGem',
+    color: grey('#8a8a8a'),
+    metalness: 0,
+    roughness: 0.035,
+    transmission: 0.7,
+    ior: 2.417,
+    thickness: 0.28,
+    clearcoat: 1,
+    attenuationColor: grey('#2a2a2a'),
+    attenuationDistance: 0.6,
+    envMapIntensity: 1,
+    flatShading: true,
+  });
+
+  const textMetal = new THREE.MeshPhysicalMaterial({
+    name: 'textMetal',
+    color: grey('#f2f2f2'),
+    metalness: 1,
+    roughness: 0.06,
+    clearcoat: 0.15,
+    clearcoatRoughness: 0.08,
+  });
+
+  const textGem = new THREE.MeshPhysicalMaterial({
+    name: 'textGem',
+    color: grey('#ffffff'),
+    metalness: 0,
+    roughness: 0.005,
+    transmission: 1,
+    ior: 2.417,
+    thickness: 0.6,
+    clearcoat: 1,
+    clearcoatRoughness: 0,
+    attenuationColor: grey('#ffffff'),
+    attenuationDistance: 4,
+    flatShading: true,
+  });
+
+  const applyMetal = () => {
+    const preset = findMetal(metalId);
+    metal.color.set(preset.color);
+    metal.metalness = preset.metalness;
+    metal.roughness = preset.roughness;
+    textMetal.color.set(preset.color);
+    textMetal.metalness = preset.metalness;
+    textMetal.roughness = preset.roughness;
+
+    // the under-gallery / azurage follows the chosen metal, darker and rougher
+    darkMetal.color.copy(new THREE.Color(preset.color).multiplyScalar(0.32));
+    darkMetal.metalness = Math.max(0.25, preset.metalness * 0.85);
+    darkMetal.roughness = THREE.MathUtils.clamp(preset.roughness + 0.35, 0.3, 0.78);
+  };
+
+  const applyFinish = () => {
+    const finish = findFinish(finishId);
+    metal.roughness = finish.roughness;
+    metal.clearcoat = finish.clearcoat;
+    metal.clearcoatRoughness = Math.min(0.5, finish.roughness * 1.5);
+    textMetal.roughness = finish.roughness;
+    textMetal.clearcoat = finish.clearcoat;
+    textMetal.clearcoatRoughness = metal.clearcoatRoughness;
+    // a matte finish keeps the dark parts coherently matte
+    darkMetal.roughness = THREE.MathUtils.clamp(finish.roughness + 0.3, 0.3, 0.82);
+  };
+
+  const applyGem = () => {
+    const preset = findGem(gemId);
+    gem.color.set(preset.color);
+    gem.roughness = preset.roughness;
+    gem.metalness = preset.metalness;
+    gem.transmission = preset.transmission;
+    gem.ior = preset.ior;
+    gem.thickness = preset.thickness;
+    gem.attenuationColor.set(preset.attenuationColor);
+    gem.attenuationDistance = preset.attenuationDistance || 1;
+    gem.clearcoat = preset.clearcoat;
+
+    Object.assign(textGem, {
+      roughness: preset.roughness,
+      metalness: preset.metalness,
+      transmission: preset.transmission,
+      ior: preset.ior,
+      thickness: preset.thickness,
+      clearcoat: preset.clearcoat,
+      attenuationDistance: preset.attenuationDistance || 1,
+    });
+    textGem.color.set(preset.color);
+    textGem.attenuationColor.set(preset.attenuationColor);
+
+    // accent baguettes: a darker, smokier companion stone
+    accentGem.color.copy(new THREE.Color(preset.color).multiplyScalar(0.6));
+    accentGem.roughness = Math.min(0.5, preset.roughness + 0.02);
+    accentGem.metalness = preset.metalness;
+    accentGem.transmission = Math.max(0, preset.transmission * 0.65);
+    accentGem.ior = preset.ior;
+    accentGem.thickness = Math.max(0.05, preset.thickness * 0.7);
+    accentGem.attenuationColor.copy(
+      new THREE.Color(preset.attenuationColor).lerp(new THREE.Color('#000000'), 0.55)
+    );
+    accentGem.attenuationDistance = Math.max(0.25, preset.attenuationDistance * 0.5);
+    accentGem.clearcoat = preset.clearcoat;
+  };
+
+  const refresh = () => {
+    applyMetal();
+    applyFinish();
+    applyGem();
+    all().forEach((m) => (m.needsUpdate = true));
+  };
+
+  const all = () => [metal, darkMetal, gem, accentGem, textMetal, textGem];
+
+  refresh();
 
   return {
-    platinum,
-    matteDarkMetal,
-    pureDiamond,
-    obsidian,
-    rhodiumSilver,
-    goldWhite18k,
+    metal,
+    darkMetal,
+    gem,
+    accentGem,
+    textMetal,
+    textGem,
+    setMetal: (id) => {
+      metalId = id;
+      refresh();
+    },
+    setFinish: (id) => {
+      finishId = id;
+      refresh();
+    },
+    setGem: (id) => {
+      gemId = id;
+      refresh();
+    },
+    setWireframe: (enabled) => {
+      all().forEach((material) => {
+        material.wireframe = enabled;
+      });
+    },
+    all,
+    dispose: () => all().forEach((m) => m.dispose()),
   };
 }

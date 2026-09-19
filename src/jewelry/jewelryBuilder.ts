@@ -1,581 +1,755 @@
 import * as THREE from 'three';
-import { Font, FontLoader } from 'three/examples/jsm/loaders/FontLoader.js';
-import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js';
+import type { Font } from 'three/examples/jsm/loaders/FontLoader.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
-  createRoundBrilliantGeometry,
   createBaguetteCutGeometry,
+  createBeadGeometry,
   createProngGeometry,
+  createRoundBrilliantGeometry,
 } from './gemstoneGeometry';
-import { JewelryMaterials } from './materials';
-import { luxurySerifTypeface } from './fonts/luxurySerifFont';
+import type { MaterialLibrary } from './materials';
+import type { QualityPreset } from './types';
+
+export interface JewelryDimensions {
+  innerWidth: number;
+  innerHeight: number;
+  bezelBorder: number;
+  outerWidth: number;
+  outerHeight: number;
+  plateDepth: number;
+  cornerRadius: number;
+}
+
+export interface TextFitResult {
+  text: string;
+  /** size actually used for the extrusion */
+  size: number;
+  width: number;
+  height: number;
+  /** characters dropped because the typeface has no glyph for them */
+  dropped: string[];
+  visible: boolean;
+}
+
+export interface TextOptions {
+  text: string;
+  uppercase: boolean;
+  tracking: number;
+  depth: number;
+  /** user multiplier on top of the automatic fit-to-plate size */
+  scale: number;
+}
 
 export interface JewelryAssembly {
   group: THREE.Group;
+  dimensions: JewelryDimensions;
   textMesh: THREE.Mesh | null;
-  textMaterialType: 'platinum' | 'diamond' | 'obsidian';
-  toggleTextMaterial: () => 'platinum' | 'diamond' | 'obsidian';
-  setTextMaterial: (type: 'platinum' | 'diamond' | 'obsidian') => void;
-  updateText: (newText: string) => Promise<void>;
+  setText: (font: Font, options: TextOptions, quality: QualityPreset) => TextFitResult;
+  setNameplateMaterial: (source: 'metal' | 'gem') => void;
+  cycleNameplateMaterial: () => 'metal' | 'gem';
+  nameplateMaterial: () => 'metal' | 'gem';
   raycastTargets: THREE.Object3D[];
-  setWireframe: (enabled: boolean) => void;
+  stones: number;
+  dispose: () => void;
+}
+
+/** Rounded rectangle outline used for the plate and the pavé path. */
+function roundedRectShape(w: number, h: number, r: number): THREE.Shape {
+  const shape = new THREE.Shape();
+  const x = -w / 2;
+  const y = -h / 2;
+  const radius = Math.min(r, Math.min(w, h) / 2 - 0.001);
+  shape.moveTo(x + radius, y);
+  shape.lineTo(x + w - radius, y);
+  shape.quadraticCurveTo(x + w, y, x + w, y + radius);
+  shape.lineTo(x + w, y + h - radius);
+  shape.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  shape.lineTo(x + radius, y + h);
+  shape.quadraticCurveTo(x, y + h, x, y + h - radius);
+  shape.lineTo(x, y + radius);
+  shape.quadraticCurveTo(x, y, x + radius, y);
+  return shape;
+}
+
+/** Evenly distributes points along a rounded rectangle (arc-length walk). */
+function walkRoundedRect(
+  w: number,
+  h: number,
+  r: number,
+  spacing: number
+): { x: number; y: number; angle: number }[] {
+  const radius = Math.min(r, Math.min(w, h) / 2 - 0.001);
+  const straightW = w - radius * 2;
+  const straightH = h - radius * 2;
+  const corner = (Math.PI / 2) * radius;
+  const perimeter = straightW * 2 + straightH * 2 + corner * 4;
+  const count = Math.max(4, Math.round(perimeter / spacing));
+  const step = perimeter / count;
+  const points: { x: number; y: number; angle: number }[] = [];
+
+  for (let i = 0; i < count; i++) {
+    let d = i * step;
+    let x = 0;
+    let y = 0;
+    let angle = 0;
+
+    const seg = (len: number, fn: () => void) => {
+      if (d <= len) fn();
+      else d -= len;
+    };
+
+    // bottom edge, left -> right
+    seg(straightW, () => {
+      x = -straightW / 2 + d;
+      y = -h / 2;
+      angle = 0;
+    });
+    // bottom right corner
+    seg(corner, () => {
+      const a = -Math.PI / 2 + (d / corner) * (Math.PI / 2);
+      x = straightW / 2 + Math.cos(a) * radius;
+      y = -straightH / 2 + Math.sin(a) * radius;
+      angle = Math.PI * 0.25;
+    });
+    // right edge
+    seg(straightH, () => {
+      x = w / 2;
+      y = -straightH / 2 + d;
+      angle = 0;
+    });
+    // top right corner
+    seg(corner, () => {
+      const a = 0 + (d / corner) * (Math.PI / 2);
+      x = straightW / 2 + Math.cos(a) * radius;
+      y = straightH / 2 + Math.sin(a) * radius;
+      angle = Math.PI * 0.25;
+    });
+    // top edge, right -> left
+    seg(straightW, () => {
+      x = straightW / 2 - d;
+      y = h / 2;
+      angle = 0;
+    });
+    // top left corner
+    seg(corner, () => {
+      const a = Math.PI / 2 + (d / corner) * (Math.PI / 2);
+      x = -straightW / 2 + Math.cos(a) * radius;
+      y = straightH / 2 + Math.sin(a) * radius;
+      angle = Math.PI * 0.25;
+    });
+    // left edge
+    seg(straightH, () => {
+      x = -w / 2;
+      y = straightH / 2 - d;
+      angle = 0;
+    });
+    // bottom left corner
+    seg(corner, () => {
+      const a = Math.PI + (d / corner) * (Math.PI / 2);
+      x = -straightW / 2 + Math.cos(a) * radius;
+      y = -straightH / 2 + Math.sin(a) * radius;
+      angle = Math.PI * 0.25;
+    });
+
+    points.push({ x, y, angle });
+  }
+
+  return points;
+}
+
+interface TypefaceData {
+  glyphs: Record<string, { ha: number; o?: string }>;
+  resolution: number;
+  boundingBox: { yMax: number; yMin: number };
+  underlineThickness: number;
+}
+
+const typefaceData = (font: Font): TypefaceData => font.data as unknown as TypefaceData;
+
+interface TextBuildOptions {
+  size: number;
+  depth: number;
+  /** extra letter spacing expressed in em */
+  tracking: number;
+  curveSegments: number;
+  bevelEnabled: boolean;
+  bevelSize: number;
+  bevelThickness: number;
+  bevelSegments: number;
+}
+
+interface TextBuildResult {
+  geometry: THREE.BufferGeometry;
+  width: number;
+  height: number;
+  centerX: number;
+  centerY: number;
+  isEmpty: boolean;
 }
 
 /**
- * Builds the dense, hyper-realistic Haute Joaillerie Pendant & Chain.
+ * Builds the extruded nameplate text glyph by glyph.
+ *
+ * Doing the layout ourselves (instead of leaning on THREE.TextGeometry) gives
+ * full control on tracking (three.js has no kerning/tracking support), on
+ * multi-line centring and on the per-character glyph coverage check.
  */
-export async function buildJewelryPiece(
-  materials: JewelryMaterials,
-  initialText: string = 'William'
-): Promise<JewelryAssembly> {
-  const rootGroup = new THREE.Group();
-  rootGroup.name = 'JewelryRoot';
+function buildTextGeometry(font: Font, text: string, options: TextBuildOptions): TextBuildResult {
+  const data = typefaceData(font);
+  const scale = options.size / data.resolution;
+  const lineHeight =
+    (data.boundingBox.yMax - data.boundingBox.yMin + data.underlineThickness) * scale * 1.1;
+  const tracking = options.tracking * options.size;
 
-  // 1. Load Font (try local path first, fallback to embedded luxury serif)
-  const fontLoader = new FontLoader();
-  let font: Font;
-  try {
-    font = await new Promise<Font>((resolve) => {
-      let resolved = false;
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          resolve(fontLoader.parse(luxurySerifTypeface));
-        }
-      }, 600);
+  const parts: THREE.BufferGeometry[] = [];
+  let cursorX = 0;
+  let cursorY = 0;
 
-      const paths = [
-        './assets/luxury_serif.typeface.json',
-        '/assets/luxury_serif.typeface.json',
-        './assets/droid_serif_bold.typeface.json',
-      ];
+  for (const char of Array.from(text)) {
+    if (char === '\n') {
+      cursorY -= lineHeight;
+      cursorX = 0;
+      continue;
+    }
 
-      const tryPath = (index: number) => {
-        if (index >= paths.length) {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            resolve(fontLoader.parse(luxurySerifTypeface));
-          }
-          return;
-        }
+    const glyph = data.glyphs[char];
+    const advance = (glyph?.ha ?? 0) * scale;
 
-        fontLoader.load(
-          paths[index],
-          (loadedFont) => {
-            if (!resolved) {
-              resolved = true;
-              clearTimeout(timeout);
-              resolve(loadedFont);
-            }
-          },
-          undefined,
-          () => {
-            tryPath(index + 1);
-          }
-        );
-      };
+    if (glyph?.o) {
+      const shapes = font.generateShapes(char, options.size);
+      if (shapes.length > 0) {
+        const geometry = new THREE.ExtrudeGeometry(shapes, {
+          depth: options.depth,
+          steps: 1,
+          curveSegments: options.curveSegments,
+          bevelEnabled: options.bevelEnabled,
+          bevelSize: options.bevelSize,
+          bevelThickness: options.bevelThickness,
+          bevelOffset: 0,
+          bevelSegments: options.bevelSegments,
+        });
+        geometry.translate(cursorX, cursorY, 0);
+        parts.push(geometry);
+      }
+    }
 
-      tryPath(0);
-    });
-  } catch {
-    font = fontLoader.parse(luxurySerifTypeface);
+    cursorX += advance + tracking;
   }
 
-  let currentTextMaterialType: 'platinum' | 'diamond' | 'obsidian' = 'platinum';
-  let textMesh: THREE.Mesh | null = null;
-  const raycastTargets: THREE.Object3D[] = [];
+  const merged =
+    parts.length === 1 ? parts[0] : (mergeGeometries(parts, false) ?? new THREE.BufferGeometry());
+  if (parts.length > 1) parts.forEach((part) => part.dispose());
 
-  // ==========================================
-  // A. PENDANT BASE & STEPPED PLATINUM BEZEL
-  // ==========================================
-  const pendantBaseGroup = new THREE.Group();
-  pendantBaseGroup.name = 'PendantBase';
+  if (!merged.attributes.position || merged.attributes.position.count === 0) {
+    merged.dispose();
+    return {
+      geometry: new THREE.BufferGeometry(),
+      width: 0,
+      height: 0,
+      centerX: 0,
+      centerY: 0,
+      isEmpty: true,
+    };
+  }
+
+  merged.computeBoundingBox();
+  const box = merged.boundingBox ?? new THREE.Box3();
+  return {
+    geometry: merged,
+    width: box.max.x - box.min.x,
+    height: box.max.y - box.min.y,
+    centerX: (box.max.x + box.min.x) / 2,
+    centerY: (box.max.y + box.min.y) / 2,
+    isEmpty: false,
+  };
+}
+
+/**
+ * Builds the complete pendant: stepped bezel, pierced azurage backplate,
+ * pavé halo, cardinal baguettes, corner solitaires, bail and Cuban chain.
+ */
+export function buildJewelryPiece(materials: MaterialLibrary): JewelryAssembly {
+  const rootGroup = new THREE.Group();
+  rootGroup.name = 'JewelryRoot';
 
   const innerWidth = 7.6;
   const innerHeight = 2.8;
   const bezelBorder = 0.55;
-  const outerWidth = innerWidth + bezelBorder * 2;
-  const outerHeight = innerHeight + bezelBorder * 2;
   const plateDepth = 0.65;
   const cornerRadius = 0.85;
+  const outerWidth = innerWidth + bezelBorder * 2;
+  const outerHeight = innerHeight + bezelBorder * 2;
 
-  // Function to create a rounded rectangle Shape
-  function createRoundedRectShape(w: number, h: number, r: number): THREE.Shape {
-    const shape = new THREE.Shape();
-    const x = -w / 2;
-    const y = -h / 2;
-    shape.moveTo(x + r, y);
-    shape.lineTo(x + w - r, y);
-    shape.quadraticCurveTo(x + w, y, x + w, y + r);
-    shape.lineTo(x + w, y + h - r);
-    shape.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    shape.lineTo(x + r, y + h);
-    shape.quadraticCurveTo(x, y + h, x, y + h - r);
-    shape.lineTo(x, y + r);
-    shape.quadraticCurveTo(x, y, x + r, y);
-    return shape;
-  }
+  const dimensions: JewelryDimensions = {
+    innerWidth,
+    innerHeight,
+    bezelBorder,
+    outerWidth,
+    outerHeight,
+    plateDepth,
+    cornerRadius,
+  };
 
-  // 1. Main Bezel Body (Heavy Polished Platinum Frame)
-  const outerShape = createRoundedRectShape(outerWidth, outerHeight, cornerRadius);
-  const innerHole = createRoundedRectShape(innerWidth * 0.96, innerHeight * 0.94, cornerRadius * 0.6);
-  outerShape.holes.push(innerHole);
+  const disposables: { dispose: () => void }[] = [];
+  const raycastTargets: THREE.Object3D[] = [];
 
-  const bezelGeom = new THREE.ExtrudeGeometry(outerShape, {
+  /* ---------------------------------------------------------------- *
+   * A. Pendant base: stepped bezel + azurage backplate
+   * ---------------------------------------------------------------- */
+  const pendantBaseGroup = new THREE.Group();
+  pendantBaseGroup.name = 'PendantBase';
+
+  const outerShape = roundedRectShape(outerWidth, outerHeight, cornerRadius);
+  outerShape.holes.push(roundedRectShape(innerWidth * 0.97, innerHeight * 0.95, cornerRadius * 0.6));
+
+  const bezelGeometry = new THREE.ExtrudeGeometry(outerShape, {
     depth: plateDepth,
     bevelEnabled: true,
     bevelSegments: 4,
-    bevelSize: 0.12,
-    bevelThickness: 0.12,
+    bevelSize: 0.1,
+    bevelThickness: 0.1,
     curveSegments: 16,
   });
-  // Center bezel depth
-  bezelGeom.translate(0, 0, -plateDepth / 2);
+  bezelGeometry.translate(0, 0, -plateDepth / 2);
+  disposables.push(bezelGeometry);
 
-  const bezelMesh = new THREE.Mesh(bezelGeom, materials.platinum);
+  const bezelMesh = new THREE.Mesh(bezelGeometry, materials.metal);
+  bezelMesh.name = 'Bezel';
   bezelMesh.castShadow = true;
   bezelMesh.receiveShadow = true;
   pendantBaseGroup.add(bezelMesh);
   raycastTargets.push(bezelMesh);
 
-  // 2. Azurage Honeycomb Backplate (Underneath the text for realistic CAD light passage)
-  const backPlateShape = createRoundedRectShape(innerWidth * 0.98, innerHeight * 0.96, cornerRadius * 0.5);
-  // Add pierced honeycomb holes
+  // pierced honeycomb backplate
+  const backShape = roundedRectShape(innerWidth * 0.99, innerHeight * 0.97, cornerRadius * 0.5);
   const rows = 3;
   const cols = 9;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const offsetX = (c - (cols - 1) / 2) * 0.72 + (r % 2 === 1 ? 0.36 : 0);
       const offsetY = (r - (rows - 1) / 2) * 0.65;
-      if (Math.abs(offsetX) < (innerWidth / 2 - 0.5) && Math.abs(offsetY) < (innerHeight / 2 - 0.4)) {
-        const hexHole = new THREE.Path();
-        const hexR = 0.22;
+      if (
+        Math.abs(offsetX) < innerWidth / 2 - 0.5 &&
+        Math.abs(offsetY) < innerHeight / 2 - 0.35
+      ) {
+        const hole = new THREE.Path();
+        const hexRadius = 0.21;
         for (let i = 0; i < 6; i++) {
           const a = (i / 6) * Math.PI * 2;
-          const px = offsetX + Math.cos(a) * hexR;
-          const py = offsetY + Math.sin(a) * hexR;
-          if (i === 0) hexHole.moveTo(px, py);
-          else hexHole.lineTo(px, py);
+          const px = offsetX + Math.cos(a) * hexRadius;
+          const py = offsetY + Math.sin(a) * hexRadius;
+          if (i === 0) hole.moveTo(px, py);
+          else hole.lineTo(px, py);
         }
-        backPlateShape.holes.push(hexHole);
+        backShape.holes.push(hole);
       }
     }
   }
 
-  const backPlateGeom = new THREE.ExtrudeGeometry(backPlateShape, {
-    depth: 0.22,
+  const backPlateGeometry = new THREE.ExtrudeGeometry(backShape, {
+    depth: 0.2,
     bevelEnabled: true,
     bevelSegments: 2,
-    bevelSize: 0.04,
-    bevelThickness: 0.04,
+    bevelSize: 0.035,
+    bevelThickness: 0.035,
     curveSegments: 12,
   });
-  backPlateGeom.translate(0, 0, -plateDepth / 2 - 0.22);
+  backPlateGeometry.translate(0, 0, -plateDepth / 2 - 0.2);
+  disposables.push(backPlateGeometry);
 
-  const backPlateMesh = new THREE.Mesh(backPlateGeom, materials.matteDarkMetal);
+  const backPlateMesh = new THREE.Mesh(backPlateGeometry, materials.darkMetal);
+  backPlateMesh.name = 'AzurageBackplate';
   backPlateMesh.castShadow = true;
   backPlateMesh.receiveShadow = true;
   pendantBaseGroup.add(backPlateMesh);
 
-  // 3. Under-Gallery Hallmarks (PT950 / William Atelier laser inscription on back rim)
-  const rimTrimGeom = new THREE.TorusGeometry(outerWidth * 0.36, 0.07, 8, 36);
-  rimTrimGeom.scale(1.35, 0.55, 1);
-  rimTrimGeom.translate(0, 0, -plateDepth / 2 - 0.22);
-  const rimTrimMesh = new THREE.Mesh(rimTrimGeom, materials.rhodiumSilver);
-  pendantBaseGroup.add(rimTrimMesh);
-
-  // ==========================================
-  // B. DIAMOND PAVÉ HALO & MICRO-PRONGS
-  // ==========================================
+  /* ---------------------------------------------------------------- *
+   * B. Pavé halo (round brilliants + micro prongs)
+   * ---------------------------------------------------------------- */
   const paveGroup = new THREE.Group();
   paveGroup.name = 'DiamondPaveHalo';
 
-  const diamondGeom = createRoundBrilliantGeometry(0.18, 0.12);
-  const prongGeom = createProngGeometry(0.042, 0.14);
+  const paveRadius = 0.105;
+  const paveGeometry = createRoundBrilliantGeometry(paveRadius, 1);
+  const prongGeometry = createProngGeometry(0.028, 0.1);
+  disposables.push(paveGeometry, prongGeometry);
 
-  // Distribute diamonds in a continuous perimeter loop around the bezel
-  const stonePositions: THREE.Vector3[] = [];
-  const stoneRotations: number[] = [];
-
-  const paveW = innerWidth + 0.15;
-  const paveH = innerHeight + 0.15;
-  const paveRadius = cornerRadius * 0.75;
-  const spacing = 0.44;
-
-  // Perimeter path points
-  const halfW = paveW / 2 - paveRadius;
-  const halfH = paveH / 2 - paveRadius;
-
-  // Top edge
-  for (let x = -halfW; x <= halfW; x += spacing) {
-    stonePositions.push(new THREE.Vector3(x, paveH / 2, plateDepth * 0.5 + 0.04));
-    stoneRotations.push(0);
-  }
-  // Right edge
-  for (let y = halfH - spacing; y >= -halfH + spacing; y -= spacing) {
-    stonePositions.push(new THREE.Vector3(paveW / 2, y, plateDepth * 0.5 + 0.04));
-    stoneRotations.push(-Math.PI / 2);
-  }
-  // Bottom edge
-  for (let x = halfW; x >= -halfW; x -= spacing) {
-    stonePositions.push(new THREE.Vector3(x, -paveH / 2, plateDepth * 0.5 + 0.04));
-    stoneRotations.push(Math.PI);
-  }
-  // Left edge
-  for (let y = -halfH + spacing; y <= halfH - spacing; y += spacing) {
-    stonePositions.push(new THREE.Vector3(-paveW / 2, y, plateDepth * 0.5 + 0.04));
-    stoneRotations.push(Math.PI / 2);
-  }
-
-  // Corners with corner curve
-  const cornerAngles = [
-    { cx: halfW, cy: halfH, start: 0, end: Math.PI / 2 },
-    { cx: -halfW, cy: halfH, start: Math.PI / 2, end: Math.PI },
-    { cx: -halfW, cy: -halfH, start: Math.PI, end: (3 * Math.PI) / 2 },
-    { cx: halfW, cy: -halfH, start: (3 * Math.PI) / 2, end: Math.PI * 2 },
-  ];
-  for (const corner of cornerAngles) {
-    const steps = 3;
-    for (let s = 1; s <= steps; s++) {
-      const a = corner.start + ((corner.end - corner.start) * s) / (steps + 1);
-      const px = corner.cx + Math.cos(a) * paveRadius;
-      const py = corner.cy + Math.sin(a) * paveRadius;
-      stonePositions.push(new THREE.Vector3(px, py, plateDepth * 0.5 + 0.04));
-      stoneRotations.push(a);
-    }
-  }
-
-  // Create InstancedMesh for maximum CAD facet rendering performance
-  const diamondInstanceCount = stonePositions.length;
-  const diamondInstancedMesh = new THREE.InstancedMesh(
-    diamondGeom,
-    materials.pureDiamond,
-    diamondInstanceCount
+  // The halo sits on the centre line of the bezel band (between the window
+  // edge and the outer rim), not on the window edge: stones straddling the
+  // opening would look like they are floating in the hole.
+  const bandCentre = bezelBorder * 0.5;
+  const pavePath = walkRoundedRect(
+    innerWidth + bandCentre * 2,
+    innerHeight + bandCentre * 2,
+    cornerRadius * 0.8,
+    0.42
   );
-  diamondInstancedMesh.castShadow = true;
-  diamondInstancedMesh.receiveShadow = true;
+  const frontZ = plateDepth * 0.5 + 0.02;
 
-  // 4 micro-prongs per stone
-  const prongInstanceCount = diamondInstanceCount * 4;
-  const prongInstancedMesh = new THREE.InstancedMesh(
-    prongGeom,
-    materials.platinum,
-    prongInstanceCount
-  );
-  prongInstancedMesh.castShadow = true;
-  prongInstancedMesh.receiveShadow = true;
+  const stones = pavePath.length + 4 + 4; // pave + corner solitaires + baguettes
 
-  const dummyMatrix = new THREE.Matrix4();
-  const dummyQuat = new THREE.Quaternion();
-  const dummyScale = new THREE.Vector3(1, 1, 1);
+  const diamondMesh = new THREE.InstancedMesh(paveGeometry, materials.gem, pavePath.length);
+  diamondMesh.name = 'PaveStones';
+  diamondMesh.castShadow = true;
 
-  let prongIdx = 0;
-  for (let i = 0; i < diamondInstanceCount; i++) {
-    const pos = stonePositions[i];
-    const rotZ = stoneRotations[i];
+  const prongMesh = new THREE.InstancedMesh(prongGeometry, materials.metal, pavePath.length * 4);
+  prongMesh.name = 'PaveProngs';
+  prongMesh.castShadow = true;
 
-    // Diamond matrix: table facing forward (+Z), rotated to align with bezel normal
-    const rot = new THREE.Euler(Math.PI / 2, 0, rotZ);
-    dummyQuat.setFromEuler(rot);
-    dummyMatrix.compose(pos, dummyQuat, dummyScale);
-    diamondInstancedMesh.setMatrixAt(i, dummyMatrix);
+  const matrix = new THREE.Matrix4();
+  const quaternion = new THREE.Quaternion();
+  const scaleOne = new THREE.Vector3(1, 1, 1);
+  const spinEuler = new THREE.Euler();
 
-    // 4 prongs surrounding each stone
-    const prongOffset = 0.16;
-    const offsets = [
-      [-prongOffset, -prongOffset],
-      [prongOffset, -prongOffset],
-      [prongOffset, prongOffset],
-      [-prongOffset, prongOffset],
-    ];
+  let prongIndex = 0;
+  pavePath.forEach((point, index) => {
+    const position = new THREE.Vector3(point.x, point.y, frontZ);
+    // Every stone has to face the camera (+Z): the previous code rotated them
+    // radially, so the stones on the right/left/bottom edges showed their
+    // pavilion (black) instead of their table.
+    spinEuler.set(Math.PI / 2, 0, (index % 4) * (Math.PI / 2), 'ZYX');
+    quaternion.setFromEuler(spinEuler);
+    matrix.compose(position, quaternion, scaleOne);
+    diamondMesh.setMatrixAt(index, matrix);
 
-    for (const [ox, oy] of offsets) {
-      const pPos = new THREE.Vector3(pos.x + ox, pos.y + oy, pos.z + 0.02);
-      const pRot = new THREE.Euler(Math.PI / 2, 0, 0);
-      dummyQuat.setFromEuler(pRot);
-      dummyMatrix.compose(pPos, dummyQuat, dummyScale);
-      prongInstancedMesh.setMatrixAt(prongIdx++, dummyMatrix);
-    }
-  }
-
-  diamondInstancedMesh.instanceMatrix.needsUpdate = true;
-  prongInstancedMesh.instanceMatrix.needsUpdate = true;
-  paveGroup.add(diamondInstancedMesh);
-  paveGroup.add(prongInstancedMesh);
-  pendantBaseGroup.add(paveGroup);
-  raycastTargets.push(diamondInstancedMesh);
-
-  // ==========================================
-  // C. ACCENT OBSIDIAN BAGUETTES & CORNER GEMS
-  // ==========================================
-  const accentGroup = new THREE.Group();
-  accentGroup.name = 'ObsidianAccents';
-
-  const baguetteGeom = createBaguetteCutGeometry(0.38, 0.22, 1.4);
-  const baguetteInstances = [
-    // Top cardinal baguette
-    { pos: new THREE.Vector3(0, outerHeight / 2 + 0.18, plateDepth * 0.3), rot: new THREE.Euler(0, 0, Math.PI / 2) },
-    // Bottom cardinal baguette
-    { pos: new THREE.Vector3(0, -outerHeight / 2 - 0.18, plateDepth * 0.3), rot: new THREE.Euler(0, 0, Math.PI / 2) },
-    // Left cardinal baguette
-    { pos: new THREE.Vector3(-outerWidth / 2 - 0.18, 0, plateDepth * 0.3), rot: new THREE.Euler(0, 0, 0) },
-    // Right cardinal baguette
-    { pos: new THREE.Vector3(outerWidth / 2 + 0.18, 0, plateDepth * 0.3), rot: new THREE.Euler(0, 0, 0) },
-  ];
-
-  for (const b of baguetteInstances) {
-    const bMesh = new THREE.Mesh(baguetteGeom, materials.obsidian);
-    bMesh.position.copy(b.pos);
-    bMesh.rotation.copy(b.rot);
-    bMesh.castShadow = true;
-    bMesh.receiveShadow = true;
-    accentGroup.add(bMesh);
-
-    // Bezel collet cup for each baguette
-    const colletGeom = new THREE.BoxGeometry(0.46, 0.28, 1.5);
-    const colletMesh = new THREE.Mesh(colletGeom, materials.platinum);
-    colletMesh.position.copy(b.pos);
-    colletMesh.position.z -= 0.12;
-    colletMesh.rotation.copy(b.rot);
-    accentGroup.add(colletMesh);
-  }
-
-  // 4 Corner Brilliant Diamonds in Cathedral Claw Mounts
-  const cornerGems = [
-    new THREE.Vector3(outerWidth / 2 - 0.1, outerHeight / 2 - 0.1, plateDepth * 0.5 + 0.08),
-    new THREE.Vector3(-outerWidth / 2 + 0.1, outerHeight / 2 - 0.1, plateDepth * 0.5 + 0.08),
-    new THREE.Vector3(-outerWidth / 2 + 0.1, -outerHeight / 2 + 0.1, plateDepth * 0.5 + 0.08),
-    new THREE.Vector3(outerWidth / 2 - 0.1, -outerHeight / 2 + 0.1, plateDepth * 0.5 + 0.08),
-  ];
-  const largeDiamondGeom = createRoundBrilliantGeometry(0.32, 0.2);
-  for (const cg of cornerGems) {
-    const cgMesh = new THREE.Mesh(largeDiamondGeom, materials.pureDiamond);
-    cgMesh.position.copy(cg);
-    cgMesh.rotation.x = Math.PI / 2;
-    cgMesh.castShadow = true;
-    accentGroup.add(cgMesh);
-
-    // 4 prominent corner claws
-    for (let a = 0; a < 4; a++) {
-      const ang = (a / 4) * Math.PI * 2 + Math.PI / 4;
-      const clawGeom = new THREE.CylinderGeometry(0.045, 0.065, 0.32, 10);
-      const clawMesh = new THREE.Mesh(clawGeom, materials.platinum);
-      clawMesh.position.set(
-        cg.x + Math.cos(ang) * 0.28,
-        cg.y + Math.sin(ang) * 0.28,
-        cg.z
+    for (let p = 0; p < 4; p++) {
+      const angle = (p / 4) * Math.PI * 2 + Math.PI / 4;
+      const prongPos = new THREE.Vector3(
+        point.x + Math.cos(angle) * 0.145,
+        point.y + Math.sin(angle) * 0.145,
+        frontZ - 0.035
       );
-      clawMesh.rotation.x = Math.PI / 2;
-      accentGroup.add(clawMesh);
+      spinEuler.set(Math.PI / 2, 0, 0);
+      quaternion.setFromEuler(spinEuler);
+      matrix.compose(prongPos, quaternion, scaleOne);
+      prongMesh.setMatrixAt(prongIndex++, matrix);
+    }
+  });
+
+  diamondMesh.instanceMatrix.needsUpdate = true;
+  prongMesh.instanceMatrix.needsUpdate = true;
+  paveGroup.add(diamondMesh, prongMesh);
+  pendantBaseGroup.add(paveGroup);
+  raycastTargets.push(diamondMesh, prongMesh);
+
+  /* ---------------------------------------------------------------- *
+   * C. Cardinal baguettes + corner solitaires
+   * ---------------------------------------------------------------- */
+  const accentGroup = new THREE.Group();
+  accentGroup.name = 'Accents';
+
+  // the baguettes are set in the middle of each plate edge, flush with the
+  // front face so they read as a "ballerina" cardinal accent
+  const baguetteGeometry = createBaguetteCutGeometry(0.26, 0.28, 1.0);
+  const colletGeometry = new THREE.BoxGeometry(0.34, 0.34, 1.12);
+  const baguetteFrontZ = plateDepth * 0.5 + 0.05;
+  disposables.push(baguetteGeometry, colletGeometry);
+
+  const baguettes: { position: THREE.Vector3; spin: number }[] = [
+    { position: new THREE.Vector3(0, outerHeight / 2 - 0.02, baguetteFrontZ), spin: Math.PI / 2 },
+    { position: new THREE.Vector3(0, -outerHeight / 2 + 0.02, baguetteFrontZ), spin: Math.PI / 2 },
+    { position: new THREE.Vector3(-outerWidth / 2 + 0.02, 0, baguetteFrontZ), spin: 0 },
+    { position: new THREE.Vector3(outerWidth / 2 - 0.02, 0, baguetteFrontZ), spin: 0 },
+  ];
+
+  for (const baguette of baguettes) {
+    const collet = new THREE.Mesh(colletGeometry, materials.metal);
+    collet.position.copy(baguette.position).setZ(baguetteFrontZ - 0.24);
+    collet.rotation.set(Math.PI / 2, 0, baguette.spin, 'ZYX');
+    collet.castShadow = true;
+    accentGroup.add(collet);
+
+    const stone = new THREE.Mesh(baguetteGeometry, materials.accentGem);
+    stone.position.copy(baguette.position);
+    stone.rotation.set(Math.PI / 2, 0, baguette.spin, 'ZYX');
+    stone.castShadow = true;
+    accentGroup.add(stone);
+    raycastTargets.push(stone);
+  }
+
+  const solitaireGeometry = createRoundBrilliantGeometry(0.3, 1);
+  const clawGeometry = new THREE.CylinderGeometry(0.032, 0.05, 0.26, 10);
+  clawGeometry.translate(0, 0.13, 0);
+  disposables.push(solitaireGeometry, clawGeometry);
+
+  const corners: [number, number][] = [
+    [outerWidth / 2 - 0.12, outerHeight / 2 - 0.12],
+    [-outerWidth / 2 + 0.12, outerHeight / 2 - 0.12],
+    [-outerWidth / 2 + 0.12, -outerHeight / 2 + 0.12],
+    [outerWidth / 2 - 0.12, -outerHeight / 2 + 0.12],
+  ];
+  for (const [cx, cy] of corners) {
+    const stone = new THREE.Mesh(solitaireGeometry, materials.gem);
+    stone.position.set(cx, cy, plateDepth * 0.5 + 0.04);
+    stone.rotation.set(Math.PI / 2, 0, 0);
+    stone.castShadow = true;
+    accentGroup.add(stone);
+    raycastTargets.push(stone);
+
+    for (let a = 0; a < 4; a++) {
+      const angle = (a / 4) * Math.PI * 2 + Math.PI / 4;
+      const claw = new THREE.Mesh(clawGeometry, materials.metal);
+      claw.position.set(cx + Math.cos(angle) * 0.26, cy + Math.sin(angle) * 0.26, plateDepth * 0.5 - 0.03);
+      claw.rotation.set(Math.PI / 2, 0, 0);
+      claw.castShadow = true;
+      accentGroup.add(claw);
     }
   }
 
   pendantBaseGroup.add(accentGroup);
 
-  // ==========================================
-  // D. SCULPTED LUXURY BAIL & HEAVY CUBAN CHAIN
-  // ==========================================
+  /* ---------------------------------------------------------------- *
+   * D. Bail + Cuban chain
+   * ---------------------------------------------------------------- */
   const chainGroup = new THREE.Group();
-  chainGroup.name = 'LuxuryChainAndBail';
+  chainGroup.name = 'BailAndChain';
 
-  // 1. Sculpted Diamond-Encrusted Bail at Top
   const bailGroup = new THREE.Group();
-  bailGroup.position.set(0, outerHeight / 2 + 0.72, plateDepth * 0.15);
+  const bailBaseY = outerHeight / 2 + 0.42;
+  bailGroup.position.set(0, bailBaseY, plateDepth * 0.08);
 
-  const bailLoopShape = new THREE.Shape();
-  bailLoopShape.moveTo(-0.45, -0.6);
-  bailLoopShape.lineTo(0.45, -0.6);
-  bailLoopShape.quadraticCurveTo(0.55, 0.6, 0.35, 1.1);
-  bailLoopShape.quadraticCurveTo(0, 1.4, -0.35, 1.1);
-  bailLoopShape.quadraticCurveTo(-0.55, 0.6, -0.45, -0.6);
+  const bailOuter = new THREE.Shape();
+  bailOuter.moveTo(-0.42, -0.62);
+  bailOuter.lineTo(0.42, -0.62);
+  bailOuter.quadraticCurveTo(0.52, 0.55, 0.32, 1.02);
+  bailOuter.quadraticCurveTo(0, 1.3, -0.32, 1.02);
+  bailOuter.quadraticCurveTo(-0.52, 0.55, -0.42, -0.62);
 
   const bailHole = new THREE.Path();
-  bailHole.moveTo(-0.25, -0.4);
-  bailHole.lineTo(0.25, -0.4);
-  bailHole.quadraticCurveTo(0.35, 0.5, 0.2, 0.9);
-  bailHole.quadraticCurveTo(0, 1.1, -0.2, 0.9);
-  bailHole.quadraticCurveTo(-0.35, 0.5, -0.25, -0.4);
-  bailLoopShape.holes.push(bailHole);
+  bailHole.moveTo(-0.22, -0.36);
+  bailHole.lineTo(0.22, -0.36);
+  bailHole.quadraticCurveTo(0.3, 0.45, 0.18, 0.82);
+  bailHole.quadraticCurveTo(0, 1.0, -0.18, 0.82);
+  bailHole.quadraticCurveTo(-0.3, 0.45, -0.22, -0.36);
+  bailOuter.holes.push(bailHole);
 
-  const bailGeom = new THREE.ExtrudeGeometry(bailLoopShape, {
-    depth: 0.6,
+  const bailGeometry = new THREE.ExtrudeGeometry(bailOuter, {
+    depth: 0.5,
     bevelEnabled: true,
     bevelSegments: 4,
-    bevelSize: 0.08,
-    bevelThickness: 0.08,
+    bevelSize: 0.07,
+    bevelThickness: 0.07,
     curveSegments: 16,
   });
-  bailGeom.translate(0, 0, -0.3);
-  const bailMesh = new THREE.Mesh(bailGeom, materials.platinum);
-  bailMesh.castShadow = true;
-  bailGroup.add(bailMesh);
+  bailGeometry.translate(0, 0, -0.25);
+  disposables.push(bailGeometry);
 
-  // Bail micro-diamonds
-  const bailDiamondCount = 5;
-  for (let b = 0; b < bailDiamondCount; b++) {
-    const t = (b + 0.5) / bailDiamondCount;
-    const by = -0.35 + t * 1.25;
-    const bz = 0.36;
-    const bdMesh = new THREE.Mesh(diamondGeom, materials.pureDiamond);
-    bdMesh.position.set(0, by, bz);
-    bdMesh.rotation.x = Math.PI / 2;
-    bdMesh.scale.set(0.85, 0.85, 0.85);
-    bailGroup.add(bdMesh);
+  const bailMesh = new THREE.Mesh(bailGeometry, materials.metal);
+  bailMesh.name = 'Bail';
+  bailMesh.castShadow = true;
+  bailMesh.receiveShadow = true;
+  bailGroup.add(bailMesh);
+  raycastTargets.push(bailMesh);
+
+  const beadGeometry = createBeadGeometry(0.07);
+  disposables.push(beadGeometry);
+  for (let b = 0; b < 5; b++) {
+    const t = (b + 0.5) / 5;
+    const bead = new THREE.Mesh(beadGeometry, materials.gem);
+    bead.position.set(0, -0.3 + t * 1.15, 0.28);
+    bead.rotation.x = Math.PI / 2;
+    bead.scale.setScalar(0.9);
+    bailGroup.add(bead);
   }
+
   chainGroup.add(bailGroup);
 
-  // 2. Heavy Platinum Cuban / Curb Chain Links Draping Naturally
-  // Uses beveled flattened torus links interlocking at 90-degree rotations
-  const linkMajorR = 0.58;
-  const linkTubeR = 0.16;
-  const linkGeom = new THREE.TorusGeometry(linkMajorR, linkTubeR, 12, 28);
-  linkGeom.scale(1.35, 0.85, 1.0); // Flattened curb link profile
+  // heavy flattened curb links hanging on a natural drape
+  const linkMajor = 0.46;
+  const linkTube = 0.115;
+  const linkGeometry = new THREE.TorusGeometry(linkMajor, linkTube, 10, 26);
+  linkGeometry.scale(1.18, 1, 0.72);
+  disposables.push(linkGeometry);
 
-  // Chain curve path (graceful hanging arch behind the pendant)
-  const linksPerSide = 22;
+  const spacing = linkMajor * 1.55;
+  const bailTop = new THREE.Vector3(0, bailBaseY + 1.0, plateDepth * 0.08);
 
-  for (let side = -1; side <= 1; side += 2) {
-    for (let i = 0; i < linksPerSide; i++) {
-      const t = i / (linksPerSide - 1);
-      // Catenary curve trajectory
-      const linkX = side * (0.35 + Math.pow(t, 0.85) * 5.2);
-      const linkY = outerHeight / 2 + 1.45 + t * 4.8 - Math.sin(t * Math.PI * 0.4) * 0.8;
-      const linkZ = -0.3 - t * 4.2 - Math.cos(t * Math.PI * 0.5) * 0.5;
+  for (const side of [-1, 1]) {
+    const curve = new THREE.CatmullRomCurve3([
+      // both sides start next to each other on top of the bail, otherwise the
+      // first links of the two halves interpenetrate in a visible X
+      bailTop.clone().add(new THREE.Vector3(side * 0.42, -0.05, -0.15)),
+      new THREE.Vector3(side * 0.9, bailBaseY + 1.5, plateDepth * 0.08 - 0.35),
+      new THREE.Vector3(side * 2.0, bailBaseY + 2.7, -1.1),
+      new THREE.Vector3(side * 3.6, bailBaseY + 3.15, -2.6),
+      new THREE.Vector3(side * 5.6, bailBaseY + 3.4, -4.8),
+    ]);
+    const length = curve.getLength();
+    const count = Math.max(3, Math.round(length / spacing));
+    const up = new THREE.Vector3(0, 1, 0);
 
-      const linkMesh = new THREE.Mesh(linkGeom, materials.platinum);
-      linkMesh.position.set(linkX, linkY, linkZ);
+    for (let i = 0; i < count; i++) {
+      const t = (i + 0.5) / count;
+      const point = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t).normalize();
 
-      // Alternate link rotation by ~75-90 degrees to interlock realistically
-      const isOdd = i % 2 === 1;
-      const rollAngle = (side * Math.PI) / 4 + (isOdd ? Math.PI / 2.1 : 0);
-      const pitchAngle = t * 0.5;
-      const yawAngle = -side * (t * 0.4);
+      // build an orthonormal frame: the link plane must contain the tangent
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq() < 1e-6) normal.set(1, 0, 0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
 
-      linkMesh.rotation.set(pitchAngle, yawAngle, rollAngle);
-      linkMesh.castShadow = true;
-      linkMesh.receiveShadow = true;
-      chainGroup.add(linkMesh);
+      // alternate the plane of each link so they interlock
+      const planeAxis = i % 2 === 0 ? normal : binormal;
+      const ringNormal = new THREE.Vector3().crossVectors(planeAxis, tangent).normalize();
+
+      const basis = new THREE.Matrix4().makeBasis(planeAxis, tangent, ringNormal);
+      const link = new THREE.Mesh(linkGeometry, materials.metal);
+      link.position.copy(point);
+      link.quaternion.setFromRotationMatrix(basis);
+      link.castShadow = true;
+      link.receiveShadow = true;
+      chainGroup.add(link);
+      raycastTargets.push(link);
     }
   }
 
-  rootGroup.add(chainGroup);
-  rootGroup.add(pendantBaseGroup);
+  rootGroup.add(chainGroup, pendantBaseGroup);
 
-  // ==========================================
-  // E. 3D TEXT GEOMETRY ('William')
-  // ==========================================
+  /* ---------------------------------------------------------------- *
+   * E. 3D nameplate text (rebuildable)
+   * ---------------------------------------------------------------- */
   const textContainerGroup = new THREE.Group();
   textContainerGroup.name = 'TextContainer';
   pendantBaseGroup.add(textContainerGroup);
 
-  // Function to create or recreate the 3D Text Mesh with micro-bevels
-  function generateTextMesh(textString: string): THREE.Mesh {
-    const textGeometry = new TextGeometry(textString, {
-      font: font,
-      size: 1.42,
-      depth: 0.38,
-      curveSegments: 12,
-      bevelEnabled: true,
-      bevelThickness: 0.075,
-      bevelSize: 0.055,
-      bevelOffset: 0.0,
-      bevelSegments: 5,
-    });
+  let textMesh: THREE.Mesh | null = null;
+  let nameplateSource: 'metal' | 'gem' = 'metal';
 
-    // Center text bounding box perfectly
-    textGeometry.computeBoundingBox();
-    const bb = textGeometry.boundingBox;
-    let offsetX = 0;
-    let offsetY = 0;
-    if (bb) {
-      offsetX = -(bb.max.x + bb.min.x) / 2;
-      offsetY = -(bb.max.y + bb.min.y) / 2;
-    }
-    textGeometry.translate(offsetX, offsetY, plateDepth * 0.5);
-    textGeometry.computeVertexNormals();
+  // the nameplate uses dedicated material clones so it can be styled
+  // independently from the rest of the piece (see the material library)
+  const materialForNameplate = () =>
+    nameplateSource === 'gem' ? materials.textGem : materials.textMetal;
 
-    const mat =
-      currentTextMaterialType === 'diamond'
-        ? materials.pureDiamond
-        : currentTextMaterialType === 'obsidian'
-        ? materials.obsidian
-        : materials.platinum;
+  const fitText = (
+    font: Font,
+    options: TextOptions,
+    quality: QualityPreset
+  ): TextFitResult => {
+    const rawText = (options.uppercase ? options.text.toUpperCase() : options.text).trim();
+    const dropped: string[] = [];
 
-    const mesh = new THREE.Mesh(textGeometry, mat);
-    mesh.name = 'WilliamTextMesh';
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    // Drop characters the typeface has no glyph for instead of letting
+    // three.js throw (its FontLoader returns `undefined` from createPath()
+    // and the exception bubbles up, destroying the nameplate).
+    const glyphs = typefaceData(font).glyphs;
+    const safeText = Array.from(rawText)
+      .filter((char) => {
+        if (char === '\n' || char === ' ') return true;
+        const known = Boolean(glyphs[char]);
+        if (!known) dropped.push(char);
+        return known;
+      })
+      .join('');
 
-    return mesh;
-  }
-
-  // Initial text creation
-  textMesh = generateTextMesh(initialText);
-  textContainerGroup.add(textMesh);
-  raycastTargets.push(textMesh);
-
-  // Material switcher helper
-  const setTextMaterial = (type: 'platinum' | 'diamond' | 'obsidian') => {
-    currentTextMaterialType = type;
     if (textMesh) {
-      const mat =
-        type === 'diamond'
-          ? materials.pureDiamond
-          : type === 'obsidian'
-          ? materials.obsidian
-          : materials.platinum;
-      textMesh.material = mat;
-    }
-  };
-
-  const toggleTextMaterial = (): 'platinum' | 'diamond' | 'obsidian' => {
-    if (currentTextMaterialType === 'platinum') {
-      setTextMaterial('diamond');
-    } else if (currentTextMaterialType === 'diamond') {
-      setTextMaterial('obsidian');
-    } else {
-      setTextMaterial('platinum');
-    }
-    return currentTextMaterialType;
-  };
-
-  // Live text update helper
-  const updateText = async (newText: string) => {
-    if (!newText.trim()) return;
-    if (textMesh) {
-      // Remove previous target from raycast
-      const idx = raycastTargets.indexOf(textMesh);
-      if (idx !== -1) raycastTargets.splice(idx, 1);
-
       textContainerGroup.remove(textMesh);
       textMesh.geometry.dispose();
+      const index = raycastTargets.indexOf(textMesh);
+      if (index >= 0) raycastTargets.splice(index, 1);
+      textMesh = null;
     }
-    textMesh = generateTextMesh(newText);
+
+    if (!safeText.trim()) {
+      return { text: '', size: 0, width: 0, height: 0, dropped, visible: false };
+    }
+
+    // 1. cheap measuring pass (no bevel, low tessellation)
+    const measured = buildTextGeometry(font, safeText, {
+      size: 1,
+      depth: 0.02,
+      tracking: options.tracking,
+      curveSegments: 3,
+      bevelEnabled: false,
+      bevelSize: 0,
+      bevelThickness: 0,
+      bevelSegments: 1,
+    });
+
+    if (measured.isEmpty) {
+      measured.geometry.dispose();
+      return { text: safeText, size: 0, width: 0, height: 0, dropped, visible: false };
+    }
+
+    const naturalWidth = Math.max(0.001, measured.width);
+    const naturalHeight = Math.max(0.001, measured.height);
+    measured.geometry.dispose();
+
+    // 2. fit inside the plate window, then apply the user multiplier
+    const maxWidth = innerWidth * 0.9;
+    const maxHeight = innerHeight * 0.66;
+    const fittedSize = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight);
+    const size = THREE.MathUtils.clamp(fittedSize * options.scale, 0.16, 3.2);
+
+    // 3. real extrusion, bevel size relative to the fitted size so hairlines
+    //    of high-contrast typefaces are not blown up by the bevel
+    // proportionally small bevel: high contrast typefaces have hairlines that a
+    // large bevel would swallow (the tittles of the "i" turned into spheres)
+    const bevelSize = THREE.MathUtils.clamp(size * 0.011, 0.003, 0.02);
+    const built = buildTextGeometry(font, safeText, {
+      size,
+      depth: options.depth,
+      tracking: options.tracking,
+      curveSegments: quality.curveSegments,
+      bevelEnabled: true,
+      bevelSize,
+      bevelThickness: Math.min(options.depth * 0.4, bevelSize * 1.6),
+      bevelSegments: quality.bevelSegments,
+    });
+
+    if (built.isEmpty) {
+      built.geometry.dispose();
+      return { text: safeText, size, width: 0, height: 0, dropped, visible: false };
+    }
+
+    const geometry = built.geometry;
+    geometry.translate(
+      -built.centerX,
+      -built.centerY,
+      plateDepth * 0.5
+    );
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    disposables.push(geometry);
+
+    textMesh = new THREE.Mesh(geometry, materialForNameplate());
+    textMesh.name = 'NameplateText';
+    textMesh.castShadow = true;
+    textMesh.receiveShadow = true;
     textContainerGroup.add(textMesh);
     raycastTargets.push(textMesh);
-  };
 
-  // Wireframe toggle for CAD technical inspection mode
-  const setWireframe = (enabled: boolean) => {
-    rootGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        if (Array.isArray(child.material)) {
-          child.material.forEach((m) => (m.wireframe = enabled));
-        } else if (child.material) {
-          child.material.wireframe = enabled;
-        }
-      }
-    });
+    return {
+      text: safeText,
+      size,
+      width: built.width,
+      height: built.height,
+      dropped,
+      visible: true,
+    };
   };
 
   return {
     group: rootGroup,
-    textMesh,
-    textMaterialType: currentTextMaterialType,
-    toggleTextMaterial,
-    setTextMaterial,
-    updateText,
+    dimensions,
+    get textMesh() {
+      return textMesh;
+    },
+    setText: fitText,
+    setNameplateMaterial: (source) => {
+      nameplateSource = source;
+      if (textMesh) textMesh.material = materialForNameplate();
+    },
+    cycleNameplateMaterial: () => {
+      nameplateSource = nameplateSource === 'metal' ? 'gem' : 'metal';
+      if (textMesh) textMesh.material = materialForNameplate();
+      return nameplateSource;
+    },
+    nameplateMaterial: () => nameplateSource,
     raycastTargets,
-    setWireframe,
+    stones,
+    dispose: () => {
+      disposables.forEach((item) => item.dispose());
+      if (textMesh) textMesh.geometry.dispose();
+    },
   };
 }
