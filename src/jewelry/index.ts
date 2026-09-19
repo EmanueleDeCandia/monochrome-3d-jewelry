@@ -7,3 +7,6 @@ export * from './postprocessing';
 export * from './types';
 export * from './fonts';
 export * from './cameraFraming';
+export * from './timeline';
+export * from './conductor';
+export * from './takeRecorder';

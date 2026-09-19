@@ -9,6 +9,8 @@ export interface StudioEnvironmentResult {
   /** degrees */
   setEnvRotation: (degrees: number) => void;
   setLightIntensity: (scale: number) => void;
+  /** moltiplicatore del rig luci pilotato dalla timeline di ripresa */
+  setLightScale: (scale: number) => void;
   setBackdrop: (id: BackdropId) => void;
   setBackdropVisible: (visible: boolean) => void;
   setPointerLight: (enabled: boolean) => void;
@@ -256,14 +258,17 @@ export function setupStudioLighting(
 
   let presetScale = { key: 1, rim: 1, top: 1 };
   let masterScale = 1;
+  // animato dalla timeline: il rig luci fa parte della ripresa
+  let motionScale = 1;
   let pointerLightEnabled = false;
   const pointerTarget = new THREE.Vector2(0, 0);
   const keyHome = keySpotLight.position.clone();
 
   const applyLightIntensity = () => {
-    keySpotLight.intensity = 2.2 * presetScale.key * masterScale;
-    rimSpotLight.intensity = 1.4 * presetScale.rim * masterScale;
-    overheadLight.intensity = 1.0 * presetScale.top * masterScale;
+    const total = masterScale * motionScale;
+    keySpotLight.intensity = 2.2 * presetScale.key * total;
+    rimSpotLight.intensity = 1.4 * presetScale.rim * total;
+    overheadLight.intensity = 1.0 * presetScale.top * total;
   };
   applyLightIntensity();
 
@@ -284,6 +289,10 @@ export function setupStudioLighting(
     },
     setLightIntensity: (scale) => {
       masterScale = scale;
+      applyLightIntensity();
+    },
+    setLightScale: (scale) => {
+      motionScale = Math.max(0.05, scale);
       applyLightIntensity();
     },
     setBackdrop: (id) => {

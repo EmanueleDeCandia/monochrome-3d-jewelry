@@ -374,6 +374,34 @@ export interface JewelrySettings {
   autoRotateSpeed: number;
   pointerLight: boolean;
   cameraView: CameraViewId;
+
+  /* --- regia: timeline, otturatore, ripresa --- */
+  /** clip selezionato per la ripresa */
+  clip: string;
+  /** fotogrammi al secondo del take */
+  takeFps: number;
+  /** risoluzione della sequenza PNG */
+  takeScale: number;
+  /** integrazione sull'otturatore attiva (motion blur reale) */
+  motionBlur: boolean;
+  /** angolo di otturatore in gradi: 180 = mezzo fotogramma, come al cinema */
+  shutterAngle: number;
+  /** sub-frame campionati per fotogramma */
+  shutterSamples: number;
+  /** profondità di campo */
+  dof: boolean;
+  /** distanza di fuoco in unità di scena */
+  focusDistance: number;
+  dofAperture: number;
+  dofMaxBlur: number;
+  /** formato del take */
+  takeFormat: 'webm' | 'png';
+  /** sequenza PNG con canale alpha */
+  takeTransparent: boolean;
+  /** sequenza PNG con pass di profondità */
+  takeDepth: boolean;
+  /** riproduci il clip in loop */
+  loopTake: boolean;
 }
 
 export const DEFAULT_SETTINGS: JewelrySettings = {
@@ -409,6 +437,21 @@ export const DEFAULT_SETTINGS: JewelrySettings = {
   autoRotateSpeed: 0.6,
   pointerLight: false,
   cameraView: 'hero',
+
+  clip: 'orbit',
+  takeFps: 30,
+  takeScale: 2,
+  motionBlur: false,
+  shutterAngle: 180,
+  shutterSamples: 4,
+  dof: false,
+  focusDistance: 12.5,
+  dofAperture: 0.00035,
+  dofMaxBlur: 0.008,
+  takeFormat: 'png',
+  takeTransparent: false,
+  takeDepth: false,
+  loopTake: true,
 };
 
 export const SETTINGS_LIMITS = {
@@ -421,6 +464,13 @@ export const SETTINGS_LIMITS = {
   exposure: { min: 0.25, max: 2.2, step: 0.01 },
   bloomStrength: { min: 0, max: 0.8, step: 0.01 },
   autoRotateSpeed: { min: 0, max: 2, step: 0.01 },
+  takeFps: { min: 12, max: 60, step: 1 },
+  takeScale: { min: 1, max: 3, step: 1 },
+  shutterAngle: { min: 0, max: 360, step: 5 },
+  shutterSamples: { min: 1, max: 8, step: 1 },
+  focusDistance: { min: 2, max: 30, step: 0.1 },
+  dofAperture: { min: 0, max: 0.004, step: 0.00005 },
+  dofMaxBlur: { min: 0, max: 0.05, step: 0.001 },
   text: { maxLength: 22 },
 } as const;
 

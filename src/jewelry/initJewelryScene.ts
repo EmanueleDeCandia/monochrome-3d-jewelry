@@ -6,6 +6,14 @@ import { buildJewelryPiece, type JewelryAssembly, type TextFitResult } from './j
 import { setupPostprocessing, type PostprocessingPipeline } from './postprocessing';
 import { setupStudioLighting, type StudioEnvironmentResult } from './studioEnvironment';
 import { computeFramingFov, computeViewDistance } from './cameraFraming';
+import { Conductor } from './conductor';
+import { CLIP_PRESETS, findClip, shutterSpan, type RigState } from './timeline';
+import {
+  TakeRecorder,
+  type TakePlan,
+  type TakeProgress,
+  type TakeResult,
+} from './takeRecorder';
 import {
   DEFAULT_SETTINGS,
   findCameraView,
@@ -30,6 +38,20 @@ export interface CaptureOptions {
   transparent?: boolean;
 }
 
+export interface DirectorState {
+  clip: string;
+  clipLabel: string;
+  clips: { id: string; label: string; hint: string; duration: number; loop: boolean }[];
+  time: number;
+  duration: number;
+  frames: number;
+  fps: number;
+  playing: boolean;
+  recording: boolean;
+  progress: number;
+  loop: boolean;
+}
+
 export interface JewelrySceneHandle {
   applySettings: (patch: Partial<JewelrySettings>) => void;
   getSettings: () => JewelrySettings;
@@ -39,6 +61,21 @@ export interface JewelrySceneHandle {
   resetView: () => void;
   capture: (options?: CaptureOptions) => string;
   getStats: () => SceneStats;
+  /** regia: trasporto della timeline */
+  director: {
+    state: () => DirectorState;
+    onState: (listener: (state: DirectorState) => void) => () => void;
+    onProgress: (listener: (progress: TakeProgress | null) => void) => () => void;
+    play: () => void;
+    pause: () => void;
+    toggle: () => void;
+    stop: () => void;
+    seek: (time: number) => void;
+    step: (frames: number) => void;
+    setClip: (clipId: string) => void;
+    record: (plan: TakePlan) => Promise<TakeResult>;
+    cancel: () => void;
+  };
   dispose: () => void;
 }
 
@@ -380,10 +417,245 @@ export async function initJewelryScene(
       rebuildText();
     }
 
+    /* --- regia --- */
+    if (changed('clip')) conductor.setClip(settings.clip);
+    if (changed('takeFps') || changed('clip')) conductor.setFps(settings.takeFps);
+    if (changed('loopTake')) conductor.setLoop(settings.loopTake);
+    if (changed('motionBlur') || changed('shutterSamples')) {
+      // 1 sub-frame = campione singolo, cioè nessuna integrazione
+      if (!settings.motionBlur) conductor.refresh();
+    }
+    if (
+      changed('dof') ||
+      changed('dofAperture') ||
+      changed('dofMaxBlur') ||
+      changed('focusDistance') ||
+      changed('wireframe')
+    ) {
+      postprocessing.setBokeh(settings.dof && !settings.wireframe);
+      postprocessing.setBokehOptions({
+        focus: settings.focusDistance,
+        aperture: settings.dofAperture,
+        maxblur: settings.dofMaxBlur,
+      });
+    }
+    if (changed('clip') || changed('takeFps') || changed('loopTake')) emitDirector();
+
     if (changed('autoRotate')) controls.autoRotate = settings.autoRotate;
     if (changed('autoRotateSpeed')) controls.autoRotateSpeed = settings.autoRotateSpeed * 2;
     if (changed('cameraView')) setCameraView(settings.cameraView);
   };
+
+
+  /* -------------------------------------------------------------- *
+   * Regia: timeline, otturatore, take
+   *
+   * La regola è che **la ripresa è una funzione del tempo**: la timeline
+   * produce un `RigState`, il rig posiziona camera, piatto e luci. Quando la
+   * regia è attiva i controlli orbit sono disattivati; quando si ferma,
+   * OrbitControls riparte dalla posizione raggiunta (ricava la sua sfera dalla
+   * posizione corrente della camera, quindi la transizione è continua).
+   * -------------------------------------------------------------- */
+  const applyRig = (rig: RigState) => {
+    const distance = computeViewDistance(camera.fov, camera.aspect, {
+      width: rig.fit.width,
+      height: rig.fit.height,
+    });
+    camera.position.copy(rig.target).addScaledVector(rig.direction, distance);
+    camera.lookAt(rig.target);
+    controls.target.copy(rig.target);
+    assembly.group.rotation.y = THREE.MathUtils.degToRad(rig.spin);
+    studio.setLightScale(rig.lightScale);
+  };
+
+  const directorListeners = new Set<(state: DirectorState) => void>();
+  const progressListeners = new Set<(progress: TakeProgress | null) => void>();
+  let lastDirectorEmit = 0;
+  let offlineTake = false;
+  let takeEndResolver: (() => void) | null = null;
+
+  const directorState = (): DirectorState => ({
+    clip: conductor.currentClip.id,
+    clipLabel: conductor.currentClip.label,
+    clips: CLIP_PRESETS.map((clip) => ({
+      id: clip.id,
+      label: clip.label,
+      hint: clip.hint,
+      duration: clip.duration,
+      loop: clip.loop,
+    })),
+    time: conductor.time,
+    duration: conductor.duration,
+    frames: conductor.frames,
+    fps: settings.takeFps,
+    playing: conductor.isPlaying,
+    recording: recorder.isRecording,
+    progress: conductor.progress,
+    loop: conductor.looping,
+  });
+
+  const emitDirector = (force = true) => {
+    const now = performance.now();
+    // lo stato viene pubblicato al massimo a ~15 Hz durante la riproduzione:
+    // la UI resta fluida senza riconciliare React a ogni fotogramma
+    if (!force && now - lastDirectorEmit < 66) return;
+    lastDirectorEmit = now;
+    const state = directorState();
+    directorListeners.forEach((listener) => listener(state));
+  };
+
+  const setProgress = (progress: TakeProgress | null) => {
+    progressListeners.forEach((listener) => listener(progress));
+  };
+
+  const conductor = new Conductor({
+    clip: findClip(settings.clip),
+    fps: settings.takeFps,
+    loop: settings.loopTake,
+    onRig: (rig) => applyRig(rig),
+    onTime: () => emitDirector(false),
+    onEnd: () => {
+      takeEndResolver?.();
+      takeEndResolver = null;
+      emitDirector();
+    },
+  });
+
+  /** Applica il rig al tempo `time` e disegna un fotogramma (con otturatore). */
+  const renderTakeFrame = (time: number) => {
+    conductor.seek(time);
+    renderComposedFrame();
+  };
+
+  /**
+   * Disegna il fotogramma corrente integrando l'otturatore quando il motion
+   * blur è attivo: `samples` sub-frame distribuiti su metà fotogramma.
+   */
+  const renderComposedFrame = () => {
+    const samples = settings.motionBlur ? Math.max(1, Math.round(settings.shutterSamples)) : 1;
+    if (samples <= 1) {
+      postprocessing.render();
+      return;
+    }
+    const span = shutterSpan(settings.takeFps, settings.shutterAngle);
+    const center = conductor.time;
+    postprocessing.renderMotionBlurred(
+      samples,
+      Math.max(0, center - span / 2),
+      center + span / 2,
+      (t) => applyRig(conductor.rigAt(t))
+    );
+    // l'integrazione lascia la camera sull'ultimo sub-frame: la riporto al
+    // centro dell'otturatore perché una cattura statica resti esatta
+    applyRig(conductor.rigAt(center));
+  };
+
+  const applyViewportAfterTake = () => {
+    applyViewport(width, height);
+  };
+
+  /* --- pass di profondità (opzionale, per il compositing) --- */
+  const depthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  const renderDepthPass = () => {
+    const clearColor = renderer.getClearColor(new THREE.Color());
+    const clearAlpha = renderer.getClearAlpha();
+    const previousOverride = scene.overrideMaterial;
+
+    scene.overrideMaterial = depthMaterial;
+    renderer.setRenderTarget(null);
+    renderer.setClearColor(0xffffff, 1);
+    renderer.clear(true, true, true);
+    renderer.render(scene, camera);
+    scene.overrideMaterial = previousOverride;
+    renderer.setClearColor(clearColor, clearAlpha);
+  };
+
+  /* --- registratore --- */
+  const recorder = new TakeRecorder({
+    canvas,
+    beginTake: (plan) => {
+      const previousSize = renderer.getSize(new THREE.Vector2());
+      const previousPixelRatio = renderer.getPixelRatio();
+      const previousAspect = camera.aspect;
+      const previousClearAlpha = renderer.getClearAlpha();
+      const previousLoop = conductor.looping;
+      const backdropWasVisible = studio.backdrop.visible;
+      const bloomWasEnabled = postprocessing.bloomPass.enabled;
+      const ssaoWasEnabled = postprocessing.ssaoPass.enabled;
+      const bokehWasEnabled = postprocessing.bokehPass.enabled;
+
+      conductor.setLoop(false);
+      offlineTake = plan.format === 'png';
+
+      if (plan.format === 'png') {
+        const factor = Math.min(plan.scale, Math.max(1, 4096 / Math.max(width, height)));
+        const targetWidth = Math.round(width * factor);
+        const targetHeight = Math.round(height * factor);
+        renderer.setPixelRatio(1);
+        renderer.setSize(targetWidth, targetHeight, false);
+        postprocessing.setSize(targetWidth, targetHeight, 1);
+        camera.aspect = targetWidth / targetHeight;
+        camera.updateProjectionMatrix();
+      } else {
+        // la ripresa video usa il viewport così com'è: la cattura dello stream
+        // segue la dimensione del canvas
+        renderer.setPixelRatio(previousPixelRatio);
+      }
+
+      if (plan.transparent || plan.depth) studio.setBackdropVisible(false);
+      if (plan.transparent) {
+        renderer.setClearAlpha(0);
+        postprocessing.setTransientDisabled(true);
+      }
+      if (plan.depth) postprocessing.setTransientDisabled(true);
+
+      emitDirector();
+
+      return () => {
+        conductor.setLoop(previousLoop);
+        offlineTake = false;
+        renderer.setPixelRatio(previousPixelRatio);
+        renderer.setSize(previousSize.x, previousSize.y, false);
+        postprocessing.setSize(previousSize.x, previousSize.y, previousPixelRatio);
+        camera.aspect = previousAspect;
+        camera.updateProjectionMatrix();
+        studio.setBackdropVisible(backdropWasVisible);
+        renderer.setClearAlpha(previousClearAlpha);
+        postprocessing.setBloom(bloomWasEnabled);
+        postprocessing.setSsao(ssaoWasEnabled);
+        postprocessing.setBokeh(bokehWasEnabled);
+        applyViewportAfterTake();
+        setProgress(null);
+        emitDirector();
+      };
+    },
+    renderAt: (time) => renderTakeFrame(time),
+    renderDepth: () => renderDepthPass(),
+    capturePng: () =>
+      new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('toBlob ha restituito null'));
+        }, 'image/png');
+      }),
+    playTake: () =>
+      new Promise<void>((resolve) => {
+        takeEndResolver = resolve;
+        conductor.play();
+        emitDirector();
+      }),
+    nextTick: () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    now: () => performance.now(),
+  });
+
+  // stato iniziale coerente con le impostazioni dei parametri
+  postprocessing.setBokehOptions({
+    focus: settings.focusDistance,
+    aperture: settings.dofAperture,
+    maxblur: settings.dofMaxBlur,
+  });
+  postprocessing.setBokeh(settings.dof);
+  conductor.refresh();
 
   /* -------------------------------------------------------------- *
    * Render loop
@@ -416,7 +688,16 @@ export async function initJewelryScene(
     const delta = Math.min(clock.getDelta(), 0.1);
     const now = performance.now();
 
-    if (cameraTween) {
+    // durante una sequenza PNG il rendering è pilotato dal registratore:
+    // il loop non deve disegnare un fotogramma diverso da quello catturato
+    if (offlineTake) {
+      studio.tick();
+      return;
+    }
+
+    const directorActive = conductor.isPlaying;
+
+    if (!directorActive && cameraTween) {
       cameraTween.elapsed += delta;
       const t = Math.min(1, cameraTween.elapsed / cameraTween.duration);
       const eased = 1 - Math.pow(1 - t, 3);
@@ -425,16 +706,24 @@ export async function initJewelryScene(
       if (t >= 1) cameraTween = null;
     }
 
-    // the turntable pauses for a moment after any interaction
-    const idle = now - lastInteraction;
-    controls.autoRotate = settings.autoRotate && idle > 1200 && !pointer.isDown && !cameraTween;
-    controls.update();
+    if (directorActive) {
+      // la regia possiede camera, piatto e luci
+      controls.enabled = false;
+      conductor.tick(delta);
+    } else {
+      controls.enabled = true;
+      // the turntable pauses for a moment after any interaction
+      const idle = now - lastInteraction;
+      controls.autoRotate = settings.autoRotate && idle > 1200 && !pointer.isDown && !cameraTween;
+      controls.update();
+    }
     studio.tick();
 
     // gentle floating so the piece feels alive
     assembly.group.position.y = Math.sin(clock.elapsedTime * 0.9) * 0.035;
 
-    postprocessing.render();
+    if (directorActive) renderComposedFrame();
+    else postprocessing.render();
 
     frameCount += 1;
     if (now - lastFpsSample >= 750) {
@@ -483,6 +772,7 @@ export async function initJewelryScene(
     const previousClearAlpha = renderer.getClearAlpha();
     const bloomWasEnabled = postprocessing.bloomPass.enabled;
     const ssaoWasEnabled = postprocessing.ssaoPass.enabled;
+    const bokehWasEnabled = postprocessing.bokehPass.enabled;
     const backdropWasVisible = studio.backdrop.visible;
 
     // identical framing, just more pixels (capped at 4K on the long edge)
@@ -517,6 +807,7 @@ export async function initJewelryScene(
     }
     postprocessing.setBloom(bloomWasEnabled);
     postprocessing.setSsao(ssaoWasEnabled);
+    postprocessing.setBokeh(bokehWasEnabled);
     renderFrame();
 
     return dataUrl;
@@ -547,6 +838,62 @@ export async function initJewelryScene(
     },
     resetView: () => setCameraView(settings.cameraView),
     capture,
+    director: {
+      state: directorState,
+      onState: (listener) => {
+        directorListeners.add(listener);
+        listener(directorState());
+        return () => directorListeners.delete(listener);
+      },
+      onProgress: (listener) => {
+        progressListeners.add(listener);
+        return () => progressListeners.delete(listener);
+      },
+      play: () => {
+        conductor.play();
+        emitDirector();
+      },
+      pause: () => {
+        conductor.pause();
+        emitDirector();
+      },
+      toggle: () => {
+        conductor.toggle();
+        emitDirector();
+      },
+      stop: () => {
+        conductor.stop();
+        emitDirector();
+      },
+      seek: (time) => {
+        conductor.seek(time);
+        renderComposedFrame();
+        emitDirector();
+      },
+      step: (frames) => {
+        if (frames >= 0) conductor.nextFrame();
+        else conductor.previousFrame();
+        renderComposedFrame();
+        emitDirector();
+      },
+      setClip: (clipId) => {
+        applySettings({ clip: clipId });
+      },
+      record: async (plan) => {
+        setProgress({ frame: 0, total: plan.frames, phase: 'render' });
+        try {
+          const result =
+            plan.format === 'webm'
+              ? await recorder.recordVideo(plan, setProgress)
+              : await recorder.recordSequence(plan, setProgress);
+          return result;
+        } finally {
+          setProgress(null);
+          emitDirector();
+        }
+      },
+      cancel: () => recorder.cancel(),
+    },
     getStats: () => ({ ...stats }),
     dispose: () => {
       cancelAnimationFrame(animationFrame);
@@ -560,6 +907,7 @@ export async function initJewelryScene(
       controls.removeEventListener('end', onControlsEnd);
       controls.dispose();
 
+      depthMaterial.dispose();
       postprocessing.dispose();
       studio.dispose();
       materials.dispose();
