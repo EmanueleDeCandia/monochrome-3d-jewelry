@@ -71,6 +71,16 @@ const expectations = [
   ['pannello luci', /Luce &amp; ambiente|Luce & ambiente/],
   ['pannello render', /Render &amp; post-produzione|Render & post-produzione/],
   ['scorciatoie in telemetria', /Scorciatoie/],
+  ['pannello regia presente', /Regia · motion control/],
+  ['selettore clip con tutti i preset', /Hero orbit[\s\S]*Push in[\s\S]*Gru zenitale[\s\S]*Reveal azurage[\s\S]*Profilo tecnico/],
+  ['trasporto con timecode', /00:00\.00/],
+  // react-dom/server interpone dei marker fra i nodi di testo: i pattern li tollerano
+  ['contatore fotogrammi', /fotogramma[\s\S]{0,20}001[\s\S]{0,20}\/[\s\S]{0,20}240/],
+  ['otturatore e DOF regolabili', /Angolo di otturatore[\s\S]*Sub-frame per fotogramma[\s\S]*Distanza di fuoco[\s\S]*Apertura/],
+  ['consegna take (video + sequenza)', /Video WebM[\s\S]*Sequenza PNG/],
+  ['pulsante di registrazione', /Registra/],
+  ['HUD di ripresa attivo sul viewport', /Posizione nella timeline/],
+  ['scorciatoia play/pausa documentata', /scorciatoie: spazio play\/pausa[\s\S]{0,60}fotogrammi[\s\S]{0,40}K registra/],
 ];
 for (const [label, pattern] of expectations) {
   check(label, pattern.test(html));

@@ -232,7 +232,9 @@ export function renderScene(group, { width = 1280, height = 800, position, targe
     }
   });
 
-  return { png: encodePng(width, height, color), stats };
+  // `rgb` is exposed so callers can accumulate several sub-frames (shutter
+  // integration) before encoding; `png` is the direct encode of this render.
+  return { png: encodePng(width, height, color), rgb: color, width, height, stats };
 }
 
 
