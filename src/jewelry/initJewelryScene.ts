@@ -50,6 +50,8 @@ export interface DirectorState {
   recording: boolean;
   progress: number;
   loop: boolean;
+  /** dimensione del canvas: serve a stimare il peso della sequenza */
+  viewport: { width: number; height: number };
 }
 
 export interface JewelrySceneHandle {
@@ -492,6 +494,7 @@ export async function initJewelryScene(
     recording: recorder.isRecording,
     progress: conductor.progress,
     loop: conductor.looping,
+    viewport: { width, height },
   });
 
   const emitDirector = (force = true) => {

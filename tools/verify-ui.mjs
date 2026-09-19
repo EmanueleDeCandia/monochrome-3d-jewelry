@@ -79,6 +79,7 @@ const expectations = [
   ['otturatore e DOF regolabili', /Angolo di otturatore[\s\S]*Sub-frame per fotogramma[\s\S]*Distanza di fuoco[\s\S]*Apertura/],
   ['consegna take (video + sequenza)', /Video WebM[\s\S]*Sequenza PNG/],
   ['pulsante di registrazione', /Registra/],
+  ['stima del peso del take prima di registrare', /fotogrammi[\s\S]{0,80}~[\s\S]{0,20}(kB|MB)/],
   ['HUD di ripresa attivo sul viewport', /Posizione nella timeline/],
   ['scorciatoia play/pausa documentata', /scorciatoie: spazio play\/pausa[\s\S]{0,60}fotogrammi[\s\S]{0,40}K registra/],
 ];

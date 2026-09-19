@@ -440,7 +440,7 @@ export const DEFAULT_SETTINGS: JewelrySettings = {
 
   clip: 'orbit',
   takeFps: 30,
-  takeScale: 2,
+  takeScale: 1,
   motionBlur: false,
   shutterAngle: 180,
   shutterSamples: 4,

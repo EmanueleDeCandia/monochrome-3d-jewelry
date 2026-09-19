@@ -113,6 +113,7 @@ export const JewelryViewer: React.FC = () => {
     recording: false,
     progress: 0,
     loop: DEFAULT_SETTINGS.loopTake,
+    viewport: { width: 1440, height: 810 },
   }));
   const [takeProgress, setTakeProgress] = useState<TakeProgress | null>(null);
   const [take, setTake] = useState<TakeResult | null>(null);
@@ -267,9 +268,21 @@ export const JewelryViewer: React.FC = () => {
     [saveBlob]
   );
 
+  /** oltre questa soglia l'archivio in memoria non vale il rischio */
+  const ZIP_BUDGET = 400 * 1024 * 1024;
+
   const handleDownloadAll = useCallback(async () => {
     const files = takeFilesRef.current;
     if (!files.length) return;
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    if (total > ZIP_BUDGET) {
+      setTakeError(
+        `Il take pesa ${(total / (1024 * 1024)).toFixed(0)} MB: troppo per un archivio in memoria. ` +
+          'Scarica i fotogrammi singolarmente o ripeti la registrazione a risoluzione più bassa.'
+      );
+      return;
+    }
+    setTakeError(null);
     const archive: Record<string, Uint8Array> = {};
     for (const file of files) {
       const response = await fetch(file.url);

@@ -380,6 +380,10 @@ const timecode = (seconds: number) => {
   return `${String(minutes).padStart(2, '0')}:${rest.toFixed(2).padStart(5, '0')}`;
 };
 
+/** stima grezza: un render scuro si comprime bene, ~0.9 byte per pixel */
+const estimateTakeSize = (frames: number, width: number, height: number, scale: number) =>
+  frames * width * height * scale * scale * 0.9;
+
 const formatBytes = (bytes: number) =>
   bytes > 1024 * 1024
     ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
@@ -401,6 +405,18 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
   const recording = director.recording;
   const frame = Math.round(director.time * director.fps);
   const busy = progress !== null;
+  // stima del peso prima di registrare: una sequenza lunga a 3x può saturare
+  // la memoria del browser, meglio dirlo prima che durante
+  const projectedSize =
+    settings.takeFormat === 'png'
+      ? estimateTakeSize(
+          director.frames,
+          director.viewport.width,
+          director.viewport.height,
+          settings.takeScale
+        )
+      : 0;
+  const heavyTake = settings.takeFormat === 'png' && projectedSize > 300 * 1024 * 1024;
 
   return (
     <Panel>
@@ -646,6 +662,22 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
           </>
         ) : null}
 
+        <div className="flex items-center justify-between text-[9px] font-mono-cad">
+          <span className="text-zinc-500 uppercase tracking-wide">Questo take</span>
+          <span className={heavyTake ? 'text-amber-400' : 'text-zinc-400'}>
+            {director.frames} fotogrammi
+            {settings.takeFormat === 'png'
+              ? ` · ${director.viewport.width * settings.takeScale}×${director.viewport.height * settings.takeScale} · ~${formatBytes(projectedSize)}`
+              : ` · ${director.duration.toFixed(1)} s in tempo reale`}
+          </span>
+        </div>
+        {heavyTake ? (
+          <div className="text-[9px] font-mono-cad text-amber-400/90 leading-snug">
+            Take pesante: abbassa la risoluzione o gli fps, oppure lascia il fondo non trasparente,
+            per non saturare la memoria del browser.
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-2 gap-[3px] pt-1">
           <button
             type="button"
@@ -701,11 +733,16 @@ export const DirectorPanel: React.FC<DirectorPanelProps> = ({
               </span>
               <button
                 type="button"
+                title="Scarica tutti i file del take in un archivio ZIP"
                 onClick={onDownloadAll}
                 className="px-1.5 py-0.5 border bg-white text-black border-white font-semibold uppercase flex items-center gap-1"
               >
                 <Download className="w-3 h-3" /> ZIP
               </button>
+            </div>
+            <div className="text-[9px] font-mono-cad text-zinc-500">
+              {formatBytes(take.files.reduce((sum, file) => sum + file.size, 0))} in totale ·{' '}
+              {take.width}×{take.height} px
             </div>
             <ul className="max-h-32 overflow-y-auto space-y-[2px] pr-1">
               {take.files.slice(0, 60).map((file) => (
